@@ -1,16 +1,3 @@
-import requests
-import json
-import os
-import random
-import asyncio
-import aiohttp
-from aiohttp_retry import RetryClient, ExponentialRetry
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from tqdm import tqdm
-from datetime import datetime, date, timedelta
-from zoneinfo import ZoneInfo
-from collections import defaultdict
-
 # ================= CONFIGURATION =================
 # Same as main scraper
 TARGET_LANGUAGES = ["Hindi", "Tamil", "Telugu", "Malayalam", "Kannada"]
@@ -19,6 +6,10 @@ AUTHORIZATION_TOKEN = "<your-auth-token>"
 SESSION_ID = "<your-session-id>"
 MAX_WORKERS = 50
 CONCURRENCY = 2
+
+# ===== NEW: Render proxy URL =====
+RENDER_SEATMAP_URL = "https://usa-render.onrender.com/api/seatmap"
+# =================================
 
 KNOWN_LANGUAGES = [
     "English", "Hindi", "Tamil", "Telugu", "Kannada",
@@ -29,14 +20,13 @@ FORMAT_KEYWORDS = [
     "4DX", "ScreenX", "Cinemark XD", "Dolby Cinema"
 ]
 
-# ================= SPOOFING HELPERS =================
+# ================= SPOOFING HELPERS (unchanged) =================
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/{version} Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:{version}) Gecko/20100101 Firefox/{version}",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_{minor}_0) AppleWebKit/537.36 Chrome/{version} Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_{minor}_0) AppleWebKit/537.36 (KHTML, like Gecko) Version/{safari_ver} Safari/605.1.15"
 ]
-
 
 def get_random_user_agent():
     template = random.choice(USER_AGENTS)
@@ -49,7 +39,7 @@ def get_random_user_agent():
 def get_random_ip():
     return ".".join(str(random.randint(1,255)) for _ in range(4))
 
-# ================= HEADER BUILDERS =================
+# ================= HEADER BUILDERS (unchanged) =================
 def get_theater_headers(zip_code, date_str):
     ip = get_random_ip()
     return {
@@ -62,6 +52,7 @@ def get_theater_headers(zip_code, date_str):
         "Connection": "keep-alive",
     }
 
+# -------- KEPT EXACTLY THE SAME ----------
 def get_seatmap_headers():
     ip = get_random_ip()
     return {
@@ -77,9 +68,9 @@ def get_seatmap_headers():
         "Client-IP": ip,
         # "Accept-Encoding": "gzip, deflate, br",   # removed to match JS
     }
+# -----------------------------------------
 
-
-# ================= PARSERS =================
+# ================= PARSERS (unchanged) =================
 def extract_language(amenities):
     for item in amenities:
         for lang in KNOWN_LANGUAGES:
@@ -117,7 +108,7 @@ def prepare_showtimes(movie):
                 })
     return out
 
-# ================= THEATER SCRAPER =================
+# ================= THEATER SCRAPER (unchanged) =================
 def get_theaters(zip_code, date_str):
     url = "https://www.fandango.com/napi/theaterswithshowtimes"
     params = {"zipCode": zip_code, "date": date_str, "page": 1, "limit": 40}
@@ -172,50 +163,32 @@ def scrape_all_shows_for_date(zip_list, date_str):
             })
     return flat
 
-# ================= SEATMAP FETCHING =================
-def seatmap_url(showtime_id):
-    return f"https://tickets.fandango.com/checkoutapi/showtimes/v2/{showtime_id}/seat-map/"
-
+# ================= SEATMAP FETCHING (URL & parsing changed, headers kept) =================
 async def fetch_seat(session, show):
     sid = str(show["showtime_id"])
+    # ---- Use Render proxy URL ----
+    params = {"showtime_id": sid}
+    # ---- Keep headers exactly as before ----
+    headers = get_seatmap_headers()
     try:
-        async with session.get(seatmap_url(sid), headers=get_seatmap_headers(), timeout=10) as resp:
+        async with session.get(RENDER_SEATMAP_URL, params=params, headers=headers, timeout=10) as resp:
             if resp.status != 200:
                 show["error"] = {"status": resp.status}
                 return
             data = await resp.json()
-            d = data.get("data", {})
-            available = d.get("totalAvailableSeatCount", 0)
-            total = d.get("totalSeatCount", 0)
+            
+            # ---- Parse the slim response from Render ----
+            total = data.get("totalSeatCount", 0)
+            available = data.get("totalAvailableSeatCount", 0)
+            price = data.get("adultTicketPrice", 0.0)
+            
             sold = total - available
             show["totalSeatSold"] = sold
             show["totalSeatCount"] = total
             show["occupancy"] = round((sold / total) * 100, 2) if total else 0
-
-            # Extract adult ticket price
-            price = 0
-            areas = d.get("areas", [])
-            for area in areas:
-                for tinfo in area.get("ticketInfo", []):
-                    if "adult" in tinfo.get("desc", "").lower():
-                        try:
-                            price = float(tinfo.get("price", 0))
-                            break
-                        except:
-                            pass
-                if price:
-                    break
-            if price == 0:
-                for area in areas:
-                    ti = area.get("ticketInfo", [])
-                    if ti:
-                        try:
-                            price = float(ti[0].get("price", 0))
-                            break
-                        except:
-                            pass
             show["adultTicketPrice"] = price
             show["grossRevenueUSD"] = round(price * sold, 2)
+            
     except Exception as e:
         show["error"] = {"exception": str(e)}
 
@@ -230,6 +203,8 @@ async def run_seatmap_fetch(shows):
         tasks = [bound(s) for s in shows]
         for f in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc="Seatmaps"):
             await f
+
+
 
 # ================= MERGE LOGIC =================
 def merge_show(old, new):

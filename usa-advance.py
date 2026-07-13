@@ -25,7 +25,7 @@ SCRAPE_DATES = [
 
 # --- Custom movies: list of {movie_id, date} ---
 CUSTOM_MOVIES = [
-     {"movie_id": 243375, "date": date(2026, 7, 23)},
+    {"movie_id": 243375, "date": date(2026, 7, 23)},
     # {"movie_id": 243819, "date": date(2026, 7, 31)},
 ]
 
@@ -36,9 +36,12 @@ ZIP_FILE = "zipcodes.txt"
 AUTHORIZATION_TOKEN = "<your-auth-token>"
 SESSION_ID = "<your-session-id>"
 
+# --- Render proxy URL (for seatmap) ---
+RENDER_SEATMAP_URL = "https://usa-render.onrender.com/api/seatmap"
+
 # --- Concurrency settings ---
 MAX_WORKERS = 50          # process pool for zip scanning
-CONCURRENCY = 15         # async seatmap requests
+CONCURRENCY = 45         # async seatmap requests
 
 # --- Language & format detection ---
 KNOWN_LANGUAGES = [
@@ -56,14 +59,17 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/{version} Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:{version}) Gecko/20100101 Firefox/{version}",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_{minor}_0) AppleWebKit/537.36 Chrome/{version} Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_{minor}_0) AppleWebKit/537.36 (KHTML, like Gecko) Version/{safari_ver} Safari/605.1.15"
 ]
 
 def get_random_user_agent():
     template = random.choice(USER_AGENTS)
     return template.format(
         version=f"{random.randint(70,120)}.0.{random.randint(1000,5000)}.{random.randint(0,150)}",
-        minor=random.randint(12,15)
+        minor=random.randint(12,15),
+        safari_ver=f"{random.randint(13,17)}.0.{random.randint(1,3)}"
     )
+
 
 def get_random_ip():
     return ".".join(str(random.randint(1,255)) for _ in range(4))
@@ -95,7 +101,6 @@ def get_seatmap_headers():
         "accept": "application/json",
         "X-Forwarded-For": ip,
         "Client-IP": ip,
-        "Accept-Encoding": "gzip, deflate, br",
     }
 
 # ================= PARSERS =================
@@ -193,49 +198,28 @@ def scrape_all_shows_for_date(zip_list, date_str):
             })
     return flat
 
-# ================= SEATMAP FETCHING (ASYNC) =================
-
-def seatmap_url(showtime_id):
-    return f"https://tickets.fandango.com/checkoutapi/showtimes/v2/{showtime_id}/seat-map/"
+# ================= SEATMAP FETCHING (ASYNC) via Render proxy =================
 
 async def fetch_seat(session, show):
     sid = str(show["showtime_id"])
+    # Use Render proxy with query param
+    params = {"showtime_id": sid}
+    # Keep original headers (even though proxy doesn't need them, but we keep exact)
+    headers = get_seatmap_headers()
     try:
-        async with session.get(seatmap_url(sid), headers=get_seatmap_headers(), timeout=10) as resp:
+        async with session.get(RENDER_SEATMAP_URL, params=params, headers=headers, timeout=10) as resp:
             if resp.status != 200:
                 show["error"] = {"status": resp.status}
                 return
             data = await resp.json()
-            d = data.get("data", {})
-            available = d.get("totalAvailableSeatCount", 0)
-            total = d.get("totalSeatCount", 0)
+            # Slim response: {totalSeatCount, totalAvailableSeatCount, adultTicketPrice}
+            total = data.get("totalSeatCount", 0)
+            available = data.get("totalAvailableSeatCount", 0)
+            price = data.get("adultTicketPrice", 0.0)
             sold = total - available
             show["totalSeatSold"] = sold
             show["totalSeatCount"] = total
             show["occupancy"] = round((sold / total) * 100, 2) if total else 0
-
-            # Extract adult ticket price
-            price = 0
-            areas = d.get("areas", [])
-            for area in areas:
-                for tinfo in area.get("ticketInfo", []):
-                    if "adult" in tinfo.get("desc", "").lower():
-                        try:
-                            price = float(tinfo.get("price", 0))
-                            break
-                        except:
-                            pass
-                if price:
-                    break
-            if price == 0:
-                for area in areas:
-                    ti = area.get("ticketInfo", [])
-                    if ti:
-                        try:
-                            price = float(ti[0].get("price", 0))
-                            break
-                        except:
-                            pass
             show["adultTicketPrice"] = price
             show["grossRevenueUSD"] = round(price * sold, 2)
     except Exception as e:

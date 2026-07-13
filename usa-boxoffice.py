@@ -19,7 +19,7 @@ ZIP_FILE = "zipcodes.txt"
 AUTHORIZATION_TOKEN = "<your-auth-token>"
 SESSION_ID = "<your-session-id>"
 MAX_WORKERS = 50
-CONCURRENCY = 2
+CONCURRENCY = 45
 
 # ===== NEW: Render proxy URL =====
 RENDER_SEATMAP_URL = "https://usa-render.onrender.com/api/seatmap"

@@ -42,7 +42,8 @@ def get_random_user_agent():
     template = random.choice(USER_AGENTS)
     return template.format(
         version=f"{random.randint(70,120)}.0.{random.randint(1000,5000)}.{random.randint(0,150)}",
-        minor=random.randint(12,15)
+        minor=random.randint(12,15),
+        safari_ver=f"{random.randint(13,17)}.0.{random.randint(1,3)}"
     )
 
 def get_random_ip():

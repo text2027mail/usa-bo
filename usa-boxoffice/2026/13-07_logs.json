@@ -6,5 +6,13 @@
     "avg_occupancy": 2.26,
     "tickets_sold": 1738,
     "unique_venues": 225
+  },
+  {
+    "time": "2026-07-13 11:44:04 PM",
+    "total_gross_usd": 25561.46,
+    "total_shows": 790,
+    "avg_occupancy": 2.33,
+    "tickets_sold": 1790,
+    "unique_venues": 225
   }
 ]

@@ -34,7 +34,9 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/{version} Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:{version}) Gecko/20100101 Firefox/{version}",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_{minor}_0) AppleWebKit/537.36 Chrome/{version} Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_{minor}_0) AppleWebKit/537.36 (KHTML, like Gecko) Version/{safari_ver} Safari/605.1.15"
 ]
+
 
 def get_random_user_agent():
     template = random.choice(USER_AGENTS)
@@ -72,8 +74,9 @@ def get_seatmap_headers():
         "accept": "application/json",
         "X-Forwarded-For": ip,
         "Client-IP": ip,
-        "Accept-Encoding": "gzip, deflate, br",
+        # "Accept-Encoding": "gzip, deflate, br",   # removed to match JS
     }
+
 
 # ================= PARSERS =================
 def extract_language(amenities):

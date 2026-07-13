@@ -17,8 +17,8 @@ TARGET_LANGUAGES = ["Hindi", "Tamil", "Telugu", "Malayalam", "Kannada"]
 ZIP_FILE = "zipcodes.txt"
 AUTHORIZATION_TOKEN = "<your-auth-token>"
 SESSION_ID = "<your-session-id>"
-MAX_WORKERS = 30
-CONCURRENCY = 200
+MAX_WORKERS = 50
+CONCURRENCY = 50
 
 KNOWN_LANGUAGES = [
     "English", "Hindi", "Tamil", "Telugu", "Kannada",

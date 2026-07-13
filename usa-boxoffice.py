@@ -2,14 +2,13 @@ import requests
 import json
 import os
 import ssl
-import time
 import random
 import asyncio
 import aiohttp
 from aiohttp_retry import RetryClient, ExponentialRetry
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 from zoneinfo import ZoneInfo
 from collections import defaultdict
 
@@ -198,12 +197,10 @@ async def fetch_seat(session, show):
                 show["error"] = {"status": resp.status}
                 return
             data = await resp.json()
-            # Expected response: {"totalSeatCount":105, "totalAvailableSeatCount":105, "adultTicketPrice":20.49}
             total = data.get("totalSeatCount", 0)
             available = data.get("totalAvailableSeatCount", 0)
             price = data.get("adultTicketPrice", 0.0)
 
-            # If totalSeatCount == 0 or price == 0, treat as error
             if total == 0:
                 show["error"] = {"status": 500, "reason": "No seats"}
                 return
@@ -234,18 +231,11 @@ async def run_seatmap_fetch(shows):
 
 # -------- Merging logic: keep higher sold, prefer old on error ----------
 def merge_show(old, new):
-    """
-    Merge two show records.
-    - If new has error, keep old entirely.
-    - Otherwise, keep the higher totalSeatSold (to avoid losing sales).
-    - Recompute derived fields based on chosen sold.
-    """
     if not old:
         return new
     if "error" in new:
-        return old  # keep old if new fetch failed
+        return old
 
-    # Determine which sold count to use (max)
     new_sold = new.get("totalSeatSold", 0)
     old_sold = old.get("totalSeatSold", 0)
     if new_sold > old_sold:
@@ -255,7 +245,6 @@ def merge_show(old, new):
         chosen = old.copy()
         chosen_sold = old_sold
 
-    # Update derived fields based on chosen sold
     total = chosen.get("totalSeatCount", 0)
     if total and total > 0:
         chosen["occupancy"] = round((chosen_sold / total) * 100, 2)
@@ -270,10 +259,6 @@ def merge_show(old, new):
 
 # -------- Load / save helpers ----------
 def load_advance_file(date_obj):
-    """
-    Load the advance JSON file for a given date from usa-advance/YYYY/DD-MM.json
-    Returns a list of show dicts, or empty list if not found.
-    """
     year = date_obj.strftime("%Y")
     filename = date_obj.strftime("%d-%m.json")
     filepath = os.path.join("usa-advance", year, filename)
@@ -282,13 +267,9 @@ def load_advance_file(date_obj):
     try:
         with open(filepath, "r") as f:
             data = json.load(f)
-        # Expecting {"shows": [[...], ...], "summary": [...]}
         if "shows" in data and isinstance(data["shows"], list):
             show_dicts = []
             for arr in data["shows"]:
-                # order: showtime_id, date, format, language, movie_title, movie_id,
-                # theater_name, city, state, chainName, totalSeatSold, totalSeatCount,
-                # occupancy, adultTicketPrice, grossRevenueUSD
                 if len(arr) >= 15:
                     d = {
                         "showtime_id": arr[0],
@@ -313,17 +294,47 @@ def load_advance_file(date_obj):
         print(f"⚠️ Failed to load advance file {filepath}: {e}")
     return []
 
+def load_boxoffice_file(date_obj):
+    year = date_obj.strftime("%Y")
+    filename = date_obj.strftime("%d-%m.json")
+    filepath = os.path.join("usa-boxoffice", year, filename)
+    if not os.path.exists(filepath):
+        return []
+    try:
+        with open(filepath, "r") as f:
+            data = json.load(f)
+        if "shows" in data and isinstance(data["shows"], list):
+            show_dicts = []
+            for arr in data["shows"]:
+                if len(arr) >= 15:
+                    d = {
+                        "showtime_id": arr[0],
+                        "date": arr[1],
+                        "format": arr[2],
+                        "language": arr[3],
+                        "movie_title": arr[4],
+                        "movie_id": arr[5],
+                        "theater_name": arr[6],
+                        "city": arr[7],
+                        "state": arr[8],
+                        "chainName": arr[9],
+                        "totalSeatSold": arr[10],
+                        "totalSeatCount": arr[11],
+                        "occupancy": arr[12],
+                        "adultTicketPrice": arr[13],
+                        "grossRevenueUSD": arr[14],
+                    }
+                    show_dicts.append(d)
+            return show_dicts
+    except Exception as e:
+        print(f"⚠️ Failed to load boxoffice file {filepath}: {e}")
+    return []
+
 def save_boxoffice_file(date_obj, shows_dict, error_shows=None):
-    """
-    Save the merged shows (list of dicts) to usa-boxoffice/YYYY/DD-MM.json
-    in the same compact format with summary and logs.
-    Also save errors separately.
-    """
     if not shows_dict:
         print(f"No shows for {date_obj}, skipping boxoffice file.")
         return
 
-    # Deduplicate by showtime_id
     seen = set()
     unique = []
     for s in shows_dict:
@@ -332,7 +343,6 @@ def save_boxoffice_file(date_obj, shows_dict, error_shows=None):
             seen.add(sid)
             unique.append(s)
 
-    # Build compact show list (same order as advance)
     compact = []
     for s in unique:
         compact.append([
@@ -353,7 +363,6 @@ def save_boxoffice_file(date_obj, shows_dict, error_shows=None):
             s.get("grossRevenueUSD", 0.0),
         ])
 
-    # Movie-wise summary
     movie_summary = defaultdict(lambda: {
         "shows": 0,
         "tickets": 0,
@@ -363,7 +372,7 @@ def save_boxoffice_file(date_obj, shows_dict, error_shows=None):
     })
     for s in unique:
         if "error" in s:
-            continue  # skip errored shows for summary
+            continue
         movie_id = s.get("movie_id")
         movie_title = s.get("movie_title", "Unknown")
         key = (movie_id, movie_title)
@@ -402,7 +411,7 @@ def save_boxoffice_file(date_obj, shows_dict, error_shows=None):
     with open(filepath, "w") as f:
         json.dump(output, f, separators=(',', ':'))
 
-    # Save error file (if any)
+    # Save error file
     error_file = os.path.join(dir_path, f"{date_obj.strftime('%d-%m')}_errors.json")
     error_payload = {
         "last_updated": datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %I:%M:%S %p"),
@@ -411,7 +420,7 @@ def save_boxoffice_file(date_obj, shows_dict, error_shows=None):
     with open(error_file, "w") as f:
         json.dump(error_payload, f, indent=2, ensure_ascii=False)
 
-    # Save logs.json (summary + overall stats)
+    # Save logs.json
     logs_file = os.path.join(dir_path, f"{date_obj.strftime('%d-%m')}_logs.json")
     total_gross = 0.0
     total_shows = 0
@@ -439,7 +448,6 @@ def save_boxoffice_file(date_obj, shows_dict, error_shows=None):
         "unique_venues": len(venues),
     }
 
-    # If logs file exists, append
     existing_logs = []
     if os.path.exists(logs_file):
         try:
@@ -453,7 +461,6 @@ def save_boxoffice_file(date_obj, shows_dict, error_shows=None):
         json.dump(existing_logs, f, indent=2, ensure_ascii=False)
 
     print(f"📝 Log entry appended to {logs_file}")
-
     print(f"💾 Saved {len(unique)} shows to {filepath}")
 
 # -------- Main ----------
@@ -463,40 +470,58 @@ def main():
     date_str = today.strftime("%Y-%m-%d")
     print(f"📅 Box Office for today: {date_str}")
 
-    # 1. Load advance data (from usa-advance)
+    # 1. Load advance data
     advance_shows = load_advance_file(today)
     print(f"📂 Loaded {len(advance_shows)} shows from advance data.")
 
-    # 2. Load zip codes
+    # 2. Load existing boxoffice data
+    boxoffice_shows = load_boxoffice_file(today)
+    print(f"📂 Loaded {len(boxoffice_shows)} shows from existing boxoffice data.")
+
+    # 3. Build base merged dict: advance + boxoffice (boxoffice overrides advance)
+    merged_dict = {}
+    for s in advance_shows:
+        sid = str(s.get("showtime_id"))
+        merged_dict[sid] = s
+    for s in boxoffice_shows:
+        sid = str(s.get("showtime_id"))
+        merged_dict[sid] = s
+
+    print(f"🔄 Base merged (advance + boxoffice): {len(merged_dict)} shows.")
+
+    # 4. Load zip codes
     if not os.path.exists(ZIP_FILE):
         print(f"❌ Missing {ZIP_FILE}")
         return
     zipcodes = open(ZIP_FILE).read().splitlines()
     print(f"✅ {len(zipcodes)} ZIPs loaded.")
 
-    # 3. Scrape fresh showtimes for today
+    # 5. Scrape fresh showtimes
     print("🎬 Scraping fresh showtimes...")
     raw_shows = scrape_all_shows_for_date(zipcodes, date_str)
 
-    # 4. Filter by target languages
+    # 6. Filter by target languages
     lang_filtered = [s for s in raw_shows if s.get("language") in TARGET_LANGUAGES]
     print(f"🎟️ Fresh shows (raw): {len(raw_shows)}, after language filter: {len(lang_filtered)}")
 
+    # ---------- NEW: Deduplicate fresh shows by showtime_id ----------
+    unique_fresh = {}
+    for s in lang_filtered:
+        sid = str(s.get("showtime_id"))
+        if sid not in unique_fresh:
+            unique_fresh[sid] = s
+    lang_filtered = list(unique_fresh.values())
+    print(f"🎟️ Unique fresh shows after dedup: {len(lang_filtered)}")
+    # ----------------------------------------------------------------
+
     if lang_filtered:
-        # 5. Fetch seatmaps for fresh shows
         print("💺 Fetching seatmaps for fresh shows...")
         asyncio.run(run_seatmap_fetch(lang_filtered))
         fresh_shows = lang_filtered
     else:
         fresh_shows = []
 
-    # 6. Merge: start with advance shows
-    merged_dict = {}
-    for s in advance_shows:
-        sid = str(s.get("showtime_id"))
-        merged_dict[sid] = s  # base
-
-    # Process fresh shows
+    # 7. Merge fresh shows
     for fresh in fresh_shows:
         sid = str(fresh.get("showtime_id"))
         if sid in merged_dict:
@@ -504,15 +529,14 @@ def main():
         else:
             if "error" not in fresh:
                 merged_dict[sid] = fresh
-            # else: skip because no data
 
     merged_shows = list(merged_dict.values())
-    print(f"🔄 After merge: {len(merged_shows)} shows.")
+    print(f"🔄 After merging fresh data: {len(merged_shows)} shows.")
 
-    # Separate error shows for logging
+    # 8. Separate errors for logging
     error_shows = [s for s in merged_shows if "error" in s]
 
-    # 7. Save to boxoffice
+    # 9. Save to boxoffice
     save_boxoffice_file(today, merged_shows, error_shows)
 
     print("\n✅ Done.")

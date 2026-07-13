@@ -26,15 +26,15 @@ jobs:
         run: |
           for i in 1 2 3; do
             echo "Attempt $i to run scraper..."
-            python usa-boxoffice.py && break
+            python boxoffice.py && break
             if [ $i -lt 3 ]; then sleep 10; else exit 1; fi
           done
 
       - name: Commit and push changes (retry 3 times)
         run: |
           git config user.name "github-actions[bot]"
-          git config.user.email "github-actions[bot]@users.noreply.github.com"
-          git add usa-boxoffice/
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
           git commit -m "Update boxoffice data" || echo "No changes to commit"
           for i in 1 2 3; do
             echo "Push attempt $i..."

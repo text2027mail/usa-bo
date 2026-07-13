@@ -1,3 +1,17 @@
+import requests
+import json
+import os
+import random
+import asyncio
+import aiohttp
+from aiohttp_retry import RetryClient, ExponentialRetry
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from tqdm import tqdm
+from datetime import datetime, date, timedelta
+from zoneinfo import ZoneInfo
+from collections import defaultdict
+
+
 # ================= CONFIGURATION =================
 # Same as main scraper
 TARGET_LANGUAGES = ["Hindi", "Tamil", "Telugu", "Malayalam", "Kannada"]

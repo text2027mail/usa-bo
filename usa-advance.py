@@ -1,5 +1,3 @@
-will my advance bookings py code handles ereror?
-
 import requests
 import json
 import os
@@ -23,20 +21,11 @@ FETCH_TOMORROW = True
 
 # --- Dates for which we want ALL movies (target languages) ---
 SCRAPE_DATES = [
-    date(2026, 7, 10),
-    date(2026, 7, 31),
-    date(2026, 8, 1),
-    date(2026, 8, 2),
-    date(2026, 7, 29),
-    date(2026, 7, 16),
-    date(2026, 7, 17),
-    date(2026, 7, 18),
-    date(2026, 7, 19),
 ]
 
 # --- Custom movies: list of {movie_id, date} ---
 CUSTOM_MOVIES = [
-    # {"movie_id": 246072, "date": date(2026, 7, 10)},
+     {"movie_id": 243375, "date": date(2026, 7, 23)},
     # {"movie_id": 243819, "date": date(2026, 7, 31)},
 ]
 
@@ -48,8 +37,8 @@ AUTHORIZATION_TOKEN = "<your-auth-token>"
 SESSION_ID = "<your-session-id>"
 
 # --- Concurrency settings ---
-MAX_WORKERS = 30          # process pool for zip scanning
-CONCURRENCY = 200         # async seatmap requests
+MAX_WORKERS = 50          # process pool for zip scanning
+CONCURRENCY = 50         # async seatmap requests
 
 # --- Language & format detection ---
 KNOWN_LANGUAGES = [

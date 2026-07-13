@@ -38,7 +38,7 @@ SESSION_ID = "<your-session-id>"
 
 # --- Concurrency settings ---
 MAX_WORKERS = 50          # process pool for zip scanning
-CONCURRENCY = 50         # async seatmap requests
+CONCURRENCY = 15         # async seatmap requests
 
 # --- Language & format detection ---
 KNOWN_LANGUAGES = [

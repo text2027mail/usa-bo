@@ -18,7 +18,7 @@ ZIP_FILE = "zipcodes.txt"
 AUTHORIZATION_TOKEN = "<your-auth-token>"
 SESSION_ID = "<your-session-id>"
 MAX_WORKERS = 50
-CONCURRENCY = 5
+CONCURRENCY = 2
 
 KNOWN_LANGUAGES = [
     "English", "Hindi", "Tamil", "Telugu", "Kannada",

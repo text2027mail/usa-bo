@@ -11,17 +11,30 @@ from tqdm import tqdm
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
 from collections import defaultdict
+import base64
 
 # ================= CONFIGURATION =================
 TARGET_LANGUAGES = ["Hindi", "Tamil", "Telugu", "Malayalam", "Kannada"]
 ZIP_FILE = "zipcodes.txt"
 MAX_WORKERS = 50
 CONCURRENCY = 45
-RENDER_SEATMAP_URL = "https://usa-render.onrender.com/api/seatmap"
 
-# Authorization and Session (unchanged from original scraper)
+# Read seatmap URL from environment variable (must be set)
+RENDER_SEATMAP_URL = os.getenv("RENDER_SEATMAP_URL")
+if not RENDER_SEATMAP_URL:
+    raise EnvironmentError("Environment variable RENDER_SEATMAP_URL is not set")
+
+# Authorization and Session (keep public as requested)
 AUTHORIZATION_TOKEN = "<your-auth-token>"
 SESSION_ID = "<your-session-id>"
+
+# GitHub PAT and repo info
+GITHUB_TOKEN = os.getenv("GH_PAT")
+if not GITHUB_TOKEN:
+    raise EnvironmentError("Environment variable GH_PAT is not set")
+
+REPO_OWNER = "your-username"          # <-- CHANGE to your GitHub username
+REPO_NAME = "usadata2026"             # <-- CHANGE if repo name differs
 
 KNOWN_LANGUAGES = [
     "English", "Hindi", "Tamil", "Telugu", "Kannada",
@@ -50,7 +63,7 @@ def get_random_user_agent():
 def get_random_ip():
     return ".".join(str(random.randint(1,255)) for _ in range(4))
 
-# -------- Header builders (exact same as perfectheadersandmethod) ----------
+# -------- Header builders (exact same as original) ----------
 def get_headers2(zip_code, date_str):
     random_ip = get_random_ip()
     return {
@@ -190,19 +203,14 @@ def scrape_all_shows_for_date(zip_list, date_str):
 async def fetch_seat(session, show):
     sid = str(show["showtime_id"])
     params = {"showtime_id": sid}
-    headers = get_seatmap_headers()   # needed, should-not be removed
+    headers = get_seatmap_headers()
     try:
         async with session.get(RENDER_SEATMAP_URL, params=params, headers=headers, timeout=10) as resp:
-            # 1. HTTP-level error
             if resp.status != 200:
                 show["error"] = {"status": resp.status}
                 return
-
-            # 2. Read plain text response
             text = await resp.text()
             text = text.strip()
-
-            # 3. Error indicator: "e" + status code (e.g., e404)
             if text.startswith('e'):
                 try:
                     status_code = int(text[1:])
@@ -210,13 +218,10 @@ async def fetch_seat(session, show):
                     status_code = 500
                 show["error"] = {"status": status_code}
                 return
-
-            # 4. Success: three comma-separated values
             parts = text.split(',')
             if len(parts) != 3:
                 show["error"] = {"status": 500, "reason": "Invalid response format"}
                 return
-
             try:
                 total = int(parts[0].strip())
                 available = int(parts[1].strip())
@@ -224,23 +229,18 @@ async def fetch_seat(session, show):
             except ValueError:
                 show["error"] = {"status": 500, "reason": "Invalid numeric values"}
                 return
-
-            # 5. Sanity checks
             if total == 0:
                 show["error"] = {"status": 500, "reason": "No seats"}
                 return
             if price == 0.0:
                 show["error"] = {"status": 500, "reason": "Ticket price 0"}
                 return
-
-            # 6. Compute derived fields
             sold = total - available
             show["totalSeatSold"] = sold
             show["totalSeatCount"] = total
             show["occupancy"] = round((sold / total) * 100, 2) if total else 0.0
             show["adultTicketPrice"] = price
             show["grossRevenueUSD"] = round(price * sold, 2)
-
     except Exception as e:
         show["error"] = {"exception": str(e)}
 
@@ -262,7 +262,6 @@ def merge_show(old, new):
         return new
     if "error" in new:
         return old
-
     new_sold = new.get("totalSeatSold", 0)
     old_sold = old.get("totalSeatSold", 0)
     if new_sold > old_sold:
@@ -271,29 +270,56 @@ def merge_show(old, new):
     else:
         chosen = old.copy()
         chosen_sold = old_sold
-
     total = chosen.get("totalSeatCount", 0)
     if total and total > 0:
         chosen["occupancy"] = round((chosen_sold / total) * 100, 2)
     else:
         chosen["occupancy"] = 0.0
-
     price = chosen.get("adultTicketPrice", 0.0)
     chosen["grossRevenueUSD"] = round(price * chosen_sold, 2)
     chosen["totalSeatSold"] = chosen_sold
-
     return chosen
 
-# -------- Load / save helpers ----------
+# -------- GitHub API helpers for reading/writing remote files ----------
+def github_get_file(path):
+    """Return (content_as_string, sha) if file exists, else (None, None)."""
+    url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{path}"
+    headers = {"Authorization": f"token {GITHUB_TOKEN}"}
+    resp = requests.get(url, headers=headers)
+    if resp.status_code == 200:
+        data = resp.json()
+        content = base64.b64decode(data["content"]).decode("utf-8")
+        return content, data["sha"]
+    elif resp.status_code == 404:
+        return None, None
+    else:
+        raise Exception(f"GitHub GET error {resp.status_code}: {resp.text}")
+
+def github_put_file(path, content, sha=None):
+    """Create or update a file. Returns True on success."""
+    url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{path}"
+    headers = {"Authorization": f"token {GITHUB_TOKEN}"}
+    payload = {
+        "message": f"Update {path}",
+        "content": base64.b64encode(content.encode("utf-8")).decode("utf-8"),
+        "sha": sha,
+    }
+    resp = requests.put(url, headers=headers, json=payload)
+    if resp.status_code in (200, 201):
+        return True
+    else:
+        raise Exception(f"GitHub PUT error {resp.status_code}: {resp.text}")
+
+# -------- Load / save helpers using GitHub API ----------
 def load_advance_file(date_obj):
     year = date_obj.strftime("%Y")
     filename = date_obj.strftime("%d-%m.json")
-    filepath = os.path.join("usa-advance", year, filename)
-    if not os.path.exists(filepath):
+    path = f"usa-advance/{year}/{filename}"
+    content, _ = github_get_file(path)
+    if content is None:
         return []
     try:
-        with open(filepath, "r") as f:
-            data = json.load(f)
+        data = json.loads(content)
         if "shows" in data and isinstance(data["shows"], list):
             show_dicts = []
             for arr in data["shows"]:
@@ -318,18 +344,18 @@ def load_advance_file(date_obj):
                     show_dicts.append(d)
             return show_dicts
     except Exception as e:
-        print(f"⚠️ Failed to load advance file {filepath}: {e}")
+        print(f"⚠️ Failed to parse advance file {path}: {e}")
     return []
 
 def load_boxoffice_file(date_obj):
     year = date_obj.strftime("%Y")
     filename = date_obj.strftime("%d-%m.json")
-    filepath = os.path.join("usa-boxoffice", year, filename)
-    if not os.path.exists(filepath):
+    path = f"usa-boxoffice/{year}/{filename}"
+    content, _ = github_get_file(path)
+    if content is None:
         return []
     try:
-        with open(filepath, "r") as f:
-            data = json.load(f)
+        data = json.loads(content)
         if "shows" in data and isinstance(data["shows"], list):
             show_dicts = []
             for arr in data["shows"]:
@@ -354,7 +380,7 @@ def load_boxoffice_file(date_obj):
                     show_dicts.append(d)
             return show_dicts
     except Exception as e:
-        print(f"⚠️ Failed to load boxoffice file {filepath}: {e}")
+        print(f"⚠️ Failed to parse boxoffice file {path}: {e}")
     return []
 
 def save_boxoffice_file(date_obj, shows_dict, error_shows=None):
@@ -362,6 +388,7 @@ def save_boxoffice_file(date_obj, shows_dict, error_shows=None):
         print(f"No shows for {date_obj}, skipping boxoffice file.")
         return
 
+    # Deduplicate by showtime_id
     seen = set()
     unique = []
     for s in shows_dict:
@@ -370,6 +397,7 @@ def save_boxoffice_file(date_obj, shows_dict, error_shows=None):
             seen.add(sid)
             unique.append(s)
 
+    # Build compact list
     compact = []
     for s in unique:
         compact.append([
@@ -390,6 +418,7 @@ def save_boxoffice_file(date_obj, shows_dict, error_shows=None):
             s.get("grossRevenueUSD", 0.0),
         ])
 
+    # Summary
     movie_summary = defaultdict(lambda: {
         "shows": 0,
         "tickets": 0,
@@ -429,32 +458,41 @@ def save_boxoffice_file(date_obj, shows_dict, error_shows=None):
     }
 
     year = date_obj.strftime("%Y")
-    dir_path = os.path.join("usa-boxoffice", year)
-    os.makedirs(dir_path, exist_ok=True)
+    base_path = f"usa-boxoffice/{year}"
 
+    # 1. Main data file
     filename = date_obj.strftime("%d-%m.json")
-    filepath = os.path.join(dir_path, filename)
+    path = f"{base_path}/{filename}"
+    _, sha = github_get_file(path)
+    github_put_file(path, json.dumps(output, separators=(',', ':')), sha)
 
-    with open(filepath, "w") as f:
-        json.dump(output, f, separators=(',', ':'))
-
-    # Save error file
-    error_file = os.path.join(dir_path, f"{date_obj.strftime('%d-%m')}_errors.json")
+    # 2. Error file
+    error_path = f"{base_path}/{date_obj.strftime('%d-%m')}_errors.json"
+    _, sha = github_get_file(error_path)
     error_payload = {
         "last_updated": datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %I:%M:%S %p"),
         "errors": error_shows if error_shows else []
     }
-    with open(error_file, "w") as f:
-        json.dump(error_payload, f, indent=2, ensure_ascii=False)
+    github_put_file(error_path, json.dumps(error_payload, indent=2, ensure_ascii=False), sha)
 
-    # Save logs.json
-    logs_file = os.path.join(dir_path, f"{date_obj.strftime('%d-%m')}_logs.json")
+    # 3. Logs file – read existing, append, write back
+    logs_path = f"{base_path}/{date_obj.strftime('%d-%m')}_logs.json"
+    existing_logs = []
+    content, sha = github_get_file(logs_path)
+    if content:
+        try:
+            existing_logs = json.loads(content)
+            if not isinstance(existing_logs, list):
+                existing_logs = []
+        except Exception:
+            existing_logs = []
+
+    # Compute log entry
     total_gross = 0.0
     total_shows = 0
     total_sold = 0
     total_capacity = 0
     venues = set()
-
     for s in unique:
         if "error" in s:
             continue
@@ -465,7 +503,6 @@ def save_boxoffice_file(date_obj, shows_dict, error_shows=None):
         venues.add(s.get("theater_name"))
 
     avg_occupancy = round((total_sold / total_capacity) * 100, 2) if total_capacity else 0.0
-
     log_entry = {
         "time": datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %I:%M:%S %p"),
         "total_gross_usd": round(total_gross, 2),
@@ -474,21 +511,10 @@ def save_boxoffice_file(date_obj, shows_dict, error_shows=None):
         "tickets_sold": total_sold,
         "unique_venues": len(venues),
     }
-
-    existing_logs = []
-    if os.path.exists(logs_file):
-        try:
-            existing_logs = json.load(open(logs_file))
-            if not isinstance(existing_logs, list):
-                existing_logs = []
-        except Exception:
-            existing_logs = []
     existing_logs.append(log_entry)
-    with open(logs_file, "w") as f:
-        json.dump(existing_logs, f, indent=2, ensure_ascii=False)
+    github_put_file(logs_path, json.dumps(existing_logs, indent=2, ensure_ascii=False), sha)
 
-    print(f"📝 Log entry appended to {logs_file}")
-    print(f"💾 Saved {len(unique)} shows to {filepath}")
+    print(f"💾 Saved/updated all files for {date_obj} in {REPO_OWNER}/{REPO_NAME}")
 
 # -------- Main ----------
 def main():
@@ -497,13 +523,13 @@ def main():
     date_str = today.strftime("%Y-%m-%d")
     print(f"📅 Box Office for today: {date_str}")
 
-    # 1. Load advance data
+    # 1. Load advance data from remote
     advance_shows = load_advance_file(today)
-    print(f"📂 Loaded {len(advance_shows)} shows from advance data.")
+    print(f"📂 Loaded {len(advance_shows)} shows from advance data (remote).")
 
-    # 2. Load existing boxoffice data
+    # 2. Load existing boxoffice data from remote
     boxoffice_shows = load_boxoffice_file(today)
-    print(f"📂 Loaded {len(boxoffice_shows)} shows from existing boxoffice data.")
+    print(f"📂 Loaded {len(boxoffice_shows)} shows from existing boxoffice data (remote).")
 
     # 3. Build base merged dict: advance + boxoffice (boxoffice overrides advance)
     merged_dict = {}
@@ -513,10 +539,9 @@ def main():
     for s in boxoffice_shows:
         sid = str(s.get("showtime_id"))
         merged_dict[sid] = s
-
     print(f"🔄 Base merged (advance + boxoffice): {len(merged_dict)} shows.")
 
-    # 4. Load zip codes
+    # 4. Load zip codes from local file
     if not os.path.exists(ZIP_FILE):
         print(f"❌ Missing {ZIP_FILE}")
         return
@@ -531,7 +556,7 @@ def main():
     lang_filtered = [s for s in raw_shows if s.get("language") in TARGET_LANGUAGES]
     print(f"🎟️ Fresh shows (raw): {len(raw_shows)}, after language filter: {len(lang_filtered)}")
 
-    # ---------- NEW: Deduplicate fresh shows by showtime_id ----------
+    # Deduplicate fresh shows by showtime_id
     unique_fresh = {}
     for s in lang_filtered:
         sid = str(s.get("showtime_id"))
@@ -539,7 +564,6 @@ def main():
             unique_fresh[sid] = s
     lang_filtered = list(unique_fresh.values())
     print(f"🎟️ Unique fresh shows after dedup: {len(lang_filtered)}")
-    # ----------------------------------------------------------------
 
     if lang_filtered:
         print("💺 Fetching seatmaps for fresh shows...")
@@ -563,7 +587,7 @@ def main():
     # 8. Separate errors for logging
     error_shows = [s for s in merged_shows if "error" in s]
 
-    # 9. Save to boxoffice
+    # 9. Save to remote boxoffice
     save_boxoffice_file(today, merged_shows, error_shows)
 
     print("\n✅ Done.")

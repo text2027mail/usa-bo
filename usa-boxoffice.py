@@ -33,7 +33,7 @@ GITHUB_TOKEN = os.getenv("GH_PAT")
 if not GITHUB_TOKEN:
     raise EnvironmentError("Environment variable GH_PAT is not set")
 
-REPO_OWNER = "your-username"          # <-- CHANGE to your GitHub username
+REPO_OWNER = "text2027mail"          # <-- CHANGE to your GitHub username
 REPO_NAME = "usadata2026"             # <-- CHANGE if repo name differs
 
 KNOWN_LANGUAGES = [

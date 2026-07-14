@@ -22,25 +22,25 @@ FETCH_TOMORROW = True
 
 # --- Dates for which we want ALL movies (target languages) ---
 SCRAPE_DATES = [
-    # example: date(2026, 7, 20),
+    # date(2026, 7, 20),
 ]
 
 # --- Custom movies: list of {movie_id, date} ---
 CUSTOM_MOVIES = [
-    # {"movie_id": 243375, "date": date(2026, 7, 23)},
+{"movie_id": 243375, "date": date(2026, 7, 23)},
 ]
 
 # --- File containing US zip codes (one per line) ---
 ZIP_FILE = "zipcodes.txt"
 
-# --- Fandango credentials (replace with real values) ---
+# --- Fandango credentials ---
 AUTHORIZATION_TOKEN = "<your-auth-token>"
 SESSION_ID = "<your-session-id>"
 
-# --- Render proxy URL (for seatmap) ---
+# --- Render proxy URL ---
 RENDER_SEATMAP_URL = "https://usa-render.onrender.com/api/seatmap"
 
-# --- Concurrency settings ---
+# --- Concurrency ---
 MAX_WORKERS = 50          # process pool for zip scanning
 CONCURRENCY = 45          # async seatmap requests
 
@@ -257,38 +257,109 @@ async def run_seatmap_fetch(shows):
         for f in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc="Seatmaps"):
             await f
 
-# ================= OUTPUT WRITER (advance format) =================
+# ================= MERGING LOGIC (same as boxoffice) =================
 
-def build_compact_show(show_dict):
-    """Convert a show dict into a compact list in fixed order."""
-    return [
-        show_dict.get("showtime_id"),
-        show_dict.get("date"),
-        show_dict.get("format", "Standard"),
-        show_dict.get("language", "Unknown"),
-        show_dict.get("movie_title", "Unknown"),
-        show_dict.get("movie_id"),
-        show_dict.get("theater_name"),
-        show_dict.get("city"),
-        show_dict.get("state"),
-        show_dict.get("chainName"),
-        show_dict.get("totalSeatSold", 0),
-        show_dict.get("totalSeatCount", 0),
-        show_dict.get("occupancy", 0.0),
-        show_dict.get("adultTicketPrice", 0.0),
-        show_dict.get("grossRevenueUSD", 0.0),
-    ]
+def merge_show(old, new):
+    """
+    Merge two show records.
+    - If new has error, keep old entirely.
+    - Otherwise, keep the higher totalSeatSold (to avoid losing sales).
+    - Recompute derived fields based on chosen sold.
+    """
+    if not old:
+        return new
+    if "error" in new:
+        return old  # keep old if new fetch failed
 
-def write_date_data(date_obj, shows, error_shows=None):
+    # Determine which sold count to use (max)
+    new_sold = new.get("totalSeatSold", 0)
+    old_sold = old.get("totalSeatSold", 0)
+    if new_sold > old_sold:
+        chosen = new.copy()
+        chosen_sold = new_sold
+    else:
+        chosen = old.copy()
+        chosen_sold = old_sold
+
+    # Update derived fields based on chosen sold
+    total = chosen.get("totalSeatCount", 0)
+    if total and total > 0:
+        chosen["occupancy"] = round((chosen_sold / total) * 100, 2)
+    else:
+        chosen["occupancy"] = 0.0
+
+    price = chosen.get("adultTicketPrice", 0.0)
+    chosen["grossRevenueUSD"] = round(price * chosen_sold, 2)
+    chosen["totalSeatSold"] = chosen_sold
+
+    return chosen
+
+# ================= LOAD / SAVE ADVANCE HELPERS =================
+
+def load_existing_advance_file(date_obj):
     """
-    Write the shows for a single date to usa-advance/YYYY/DD-MM.json
-    Also write errors to DD-MM_errors.json and logs to DD-MM_logs.json.
+    Load existing advance file for the given date.
+    Returns a dict: showtime_id -> show dict, and a list of errors (if any).
     """
-    if not shows and not error_shows:
-        print(f"No shows or errors for {date_obj}, skipping file.")
+    year = date_obj.strftime("%Y")
+    filename = date_obj.strftime("%d-%m.json")
+    filepath = os.path.join("usa-advance", year, filename)
+    if not os.path.exists(filepath):
+        return {}, []
+
+    try:
+        with open(filepath, "r") as f:
+            data = json.load(f)
+        shows = {}
+        errors = []
+        if "shows" in data and isinstance(data["shows"], list):
+            for arr in data["shows"]:
+                if len(arr) >= 15:
+                    d = {
+                        "showtime_id": arr[0],
+                        "date": arr[1],
+                        "format": arr[2],
+                        "language": arr[3],
+                        "movie_title": arr[4],
+                        "movie_id": arr[5],
+                        "theater_name": arr[6],
+                        "city": arr[7],
+                        "state": arr[8],
+                        "chainName": arr[9],
+                        "totalSeatSold": arr[10],
+                        "totalSeatCount": arr[11],
+                        "occupancy": arr[12],
+                        "adultTicketPrice": arr[13],
+                        "grossRevenueUSD": arr[14],
+                    }
+                    shows[str(arr[0])] = d
+        # Also load errors from errors file if exists
+        error_file = os.path.join("usa-advance", year, f"{date_obj.strftime('%d-%m')}_errors.json")
+        if os.path.exists(error_file):
+            try:
+                with open(error_file, "r") as f:
+                    err_data = json.load(f)
+                errors = err_data.get("errors", [])
+            except Exception:
+                pass
+        return shows, errors
+    except Exception as e:
+        print(f"⚠️ Could not load existing advance file {filepath}: {e}")
+        return {}, []
+
+def write_advance_file(date_obj, merged_dict, error_shows):
+    """
+    Write merged shows to usa-advance/YYYY/DD-MM.json,
+    and errors to DD-MM_errors.json, logs to DD-MM_logs.json.
+    """
+    if not merged_dict and not error_shows:
+        print(f"No data for {date_obj}, skipping.")
         return
 
-    # Deduplicate by showtime_id (safety)
+    # Convert merged dict to list
+    shows = list(merged_dict.values())
+
+    # Deduplicate by showtime_id (just in case)
     seen = set()
     unique = []
     for s in shows:
@@ -297,8 +368,26 @@ def write_date_data(date_obj, shows, error_shows=None):
             seen.add(sid)
             unique.append(s)
 
-    # Compact show list (only successful ones)
-    compact = [build_compact_show(s) for s in unique]
+    # Build compact show list
+    compact = []
+    for s in unique:
+        compact.append([
+            s.get("showtime_id"),
+            s.get("date"),
+            s.get("format", "Standard"),
+            s.get("language", "Unknown"),
+            s.get("movie_title", "Unknown"),
+            s.get("movie_id"),
+            s.get("theater_name"),
+            s.get("city"),
+            s.get("state"),
+            s.get("chainName"),
+            s.get("totalSeatSold", 0),
+            s.get("totalSeatCount", 0),
+            s.get("occupancy", 0.0),
+            s.get("adultTicketPrice", 0.0),
+            s.get("grossRevenueUSD", 0.0),
+        ])
 
     # Movie-wise summary (only successful)
     movie_summary = defaultdict(lambda: {
@@ -309,6 +398,8 @@ def write_date_data(date_obj, shows, error_shows=None):
         "occupancy_sum": 0.0,
     })
     for s in unique:
+        if "error" in s:
+            continue
         movie_id = s.get("movie_id")
         movie_title = s.get("movie_title", "Unknown")
         key = (movie_id, movie_title)
@@ -337,7 +428,6 @@ def write_date_data(date_obj, shows, error_shows=None):
         "summary": summary_list
     }
 
-    # Create directory usa-advance/YYYY/
     year = date_obj.strftime("%Y")
     dir_path = os.path.join("usa-advance", year)
     os.makedirs(dir_path, exist_ok=True)
@@ -348,9 +438,9 @@ def write_date_data(date_obj, shows, error_shows=None):
     with open(filepath, "w") as f:
         json.dump(output, f, separators=(',', ':'))
 
-    print(f"💾 Saved {len(compact)} shows to {filepath}")
+    print(f"💾 Saved {len(unique)} shows to {filepath}")
 
-    # Save error file (if any)
+    # Save errors
     error_file = os.path.join(dir_path, f"{date_obj.strftime('%d-%m')}_errors.json")
     error_payload = {
         "last_updated": datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %I:%M:%S %p"),
@@ -360,7 +450,7 @@ def write_date_data(date_obj, shows, error_shows=None):
         json.dump(error_payload, f, indent=2, ensure_ascii=False)
     print(f"⚠️ Error file saved to {error_file}")
 
-    # Save logs.json (overall stats for this date)
+    # Save logs
     logs_file = os.path.join(dir_path, f"{date_obj.strftime('%d-%m')}_logs.json")
     total_gross = 0.0
     total_shows = 0
@@ -369,6 +459,8 @@ def write_date_data(date_obj, shows, error_shows=None):
     venues = set()
 
     for s in unique:
+        if "error" in s:
+            continue
         total_gross += s.get("grossRevenueUSD", 0.0)
         total_shows += 1
         total_sold += s.get("totalSeatSold", 0)
@@ -387,7 +479,6 @@ def write_date_data(date_obj, shows, error_shows=None):
         "errors_count": len(error_shows) if error_shows else 0,
     }
 
-    # Append to existing logs (if any) – for advance we might keep per-date log
     existing_logs = []
     if os.path.exists(logs_file):
         try:
@@ -464,14 +555,18 @@ def main():
         date_str = scrape_date.strftime("%Y-%m-%d")
         print(f"\n=== Processing date: {date_str} ===")
 
-        # Scrape all shows for this date
+        # 1. Load existing advance data
+        existing_shows, existing_errors = load_existing_advance_file(scrape_date)
+        print(f"📂 Loaded {len(existing_shows)} existing shows from advance data.")
+
+        # 2. Scrape fresh showtimes
         raw_shows = scrape_all_shows_for_date(zipcodes, date_str)
 
-        # Filter by target languages
+        # 3. Filter by target languages
         lang_filtered = [s for s in raw_shows if s.get("language") in TARGET_LANGUAGES]
         print(f"  Raw shows: {len(raw_shows)}, after language filter: {len(lang_filtered)}")
 
-        # Deduplicate by showtime_id
+        # 4. Deduplicate fresh shows by showtime_id
         unique_fresh = {}
         for s in lang_filtered:
             sid = str(s.get("showtime_id"))
@@ -480,7 +575,7 @@ def main():
         lang_filtered = list(unique_fresh.values())
         print(f"  After dedup: {len(lang_filtered)}")
 
-        # Further filter by movie_filter (if not None)
+        # 5. Filter by movie_filter (if not None)
         if movie_filter is not None:
             filtered = [s for s in lang_filtered if s.get("movie_id") in movie_filter]
             print(f"  After movie filter (only {movie_filter}): {len(filtered)}")
@@ -489,19 +584,34 @@ def main():
             print(f"  No movie filter (all target languages): {len(filtered)}")
 
         if not filtered:
-            print("  No shows match criteria. Skipping seatmap fetch and file.")
+            print("  No shows match criteria. Skipping seatmap fetch.")
+            # Still need to keep existing data? We'll just keep existing.
+            # Save merged (which is just existing) - but if we do nothing, we keep the file.
+            # However, we might want to update errors/logs? We'll skip.
             continue
 
-        # Fetch seatmap data (modifies shows in-place)
+        # 6. Fetch seatmap data (modifies shows in-place)
         asyncio.run(run_seatmap_fetch(filtered))
 
-        # Separate successful and errored
-        successful = [s for s in filtered if "error" not in s]
-        error_shows = [s for s in filtered if "error" in s]
-        print(f"  Successful shows: {len(successful)}, Errors: {len(error_shows)}")
+        # 7. Merge: start with existing shows
+        merged_dict = existing_shows.copy()
 
-        # Write the date's data
-        write_date_data(scrape_date, successful, error_shows)
+        # Process fresh shows
+        for fresh in filtered:
+            sid = str(fresh.get("showtime_id"))
+            if sid in merged_dict:
+                merged_dict[sid] = merge_show(merged_dict[sid], fresh)
+            else:
+                if "error" not in fresh:
+                    merged_dict[sid] = fresh
+                # else: skip because no data
+
+        # Separate errors from merged
+        error_shows = [s for s in merged_dict.values() if "error" in s]
+        print(f"  Successful shows: {len(merged_dict) - len(error_shows)}, Errors: {len(error_shows)}")
+
+        # 8. Write merged data
+        write_advance_file(scrape_date, merged_dict, error_shows)
 
     print("\n✅ All dates processed.")
 

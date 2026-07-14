@@ -218,17 +218,42 @@ def scrape_all_shows_for_date(zip_list, date_str):
 async def fetch_seat(session, show):
     sid = str(show["showtime_id"])
     params = {"showtime_id": sid}
-    headers = get_seatmap_headers()
+    headers = get_seatmap_headers()   # optional, can be removed
     try:
         async with session.get(RENDER_SEATMAP_URL, params=params, headers=headers, timeout=10) as resp:
+            # 1. HTTP-level error
             if resp.status != 200:
                 show["error"] = {"status": resp.status}
                 return
-            data = await resp.json()
-            total = data.get("totalSeatCount", 0)
-            available = data.get("totalAvailableSeatCount", 0)
-            price = data.get("adultTicketPrice", 0.0)
 
+            # 2. Read plain text response
+            text = await resp.text()
+            text = text.strip()
+
+            # 3. Error indicator: "e" + status code (e.g., e404)
+            if text.startswith('e'):
+                try:
+                    status_code = int(text[1:])
+                except ValueError:
+                    status_code = 500
+                show["error"] = {"status": status_code}
+                return
+
+            # 4. Success: three comma-separated values
+            parts = text.split(',')
+            if len(parts) != 3:
+                show["error"] = {"status": 500, "reason": "Invalid response format"}
+                return
+
+            try:
+                total = int(parts[0].strip())
+                available = int(parts[1].strip())
+                price = float(parts[2].strip())
+            except ValueError:
+                show["error"] = {"status": 500, "reason": "Invalid numeric values"}
+                return
+
+            # 5. Sanity checks
             if total == 0:
                 show["error"] = {"status": 500, "reason": "No seats"}
                 return
@@ -236,12 +261,14 @@ async def fetch_seat(session, show):
                 show["error"] = {"status": 500, "reason": "Ticket price 0"}
                 return
 
+            # 6. Compute derived fields
             sold = total - available
             show["totalSeatSold"] = sold
             show["totalSeatCount"] = total
             show["occupancy"] = round((sold / total) * 100, 2) if total else 0.0
             show["adultTicketPrice"] = price
             show["grossRevenueUSD"] = round(price * sold, 2)
+
     except Exception as e:
         show["error"] = {"exception": str(e)}
 

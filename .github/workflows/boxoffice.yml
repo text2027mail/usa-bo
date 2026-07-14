@@ -2,16 +2,16 @@ name: Box Office Scraper
 
 on:
   schedule:
-    - cron: '0 */3 * * *'
-    - cron: '0 3 * * *'
-    - cron: '0 4 * * *'
-  workflow_dispatch:
+    - cron: '0 */3 * * *'   # every 3 hours
+    - cron: '0 3 * * *'     # 3 AM daily
+    - cron: '0 4 * * *'     # 4 AM daily
+  workflow_dispatch:        # allow manual trigger
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: Checkout code (main repo)
         uses: actions/checkout@v3
 
       - name: Set up Python
@@ -22,7 +22,10 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run boxoffice scraper (retry 3 times)
+      - name: Run boxoffice scraper (with retries)
+        env:
+          RENDER_SEATMAP_URL: ${{ secrets.RENDER_SEATMAP_URL }}
+          GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           for i in 1 2 3; do
             echo "Attempt $i to run scraper..."
@@ -30,20 +33,4 @@ jobs:
             if [ $i -lt 3 ]; then sleep 10; else exit 1; fi
           done
 
-      - name: Commit and push changes (retry 3 times)
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -m "Update boxoffice data" || echo "No changes to commit"
-          for i in 1 2 3; do
-            echo "Push attempt $i..."
-            git push origin HEAD:main --force && break
-            if [ $i -lt 3 ]; then
-              echo "Push failed, retrying in 10 seconds..."
-              sleep 10
-            else
-              echo "All 3 push attempts failed."
-              exit 1
-            fi
-          done
+      # No git commit/push step – the script writes data directly to the remote repo via GitHub API.

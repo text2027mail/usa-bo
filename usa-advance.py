@@ -11,10 +11,10 @@ from tqdm import tqdm
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
 from collections import defaultdict
+import base64
 
 # ================= CONFIGURATION =================
 
-# Target languages (case‑insensitive)
 TARGET_LANGUAGES = ["Hindi", "Tamil", "Telugu", "Malayalam", "Kannada"]
 
 # --- Fetch tomorrow's shows (all movies with target languages) ---
@@ -27,22 +27,32 @@ SCRAPE_DATES = [
 
 # --- Custom movies: list of {movie_id, date} ---
 CUSTOM_MOVIES = [
-{"movie_id": 243375, "date": date(2026, 7, 23)},
+    {"movie_id": 243375, "date": date(2026, 7, 23)},
 ]
 
 # --- File containing US zip codes (one per line) ---
 ZIP_FILE = "zipcodes.txt"
 
-# --- Fandango credentials ---
+# --- Fandango credentials (public) ---
 AUTHORIZATION_TOKEN = "<your-auth-token>"
 SESSION_ID = "<your-session-id>"
 
-# --- Render proxy URL ---
-RENDER_SEATMAP_URL = "https://usa-render.onrender.com/api/seatmap"
+# --- Render proxy URL (from environment) ---
+RENDER_SEATMAP_URL = os.getenv("RENDER_SEATMAP_URL")
+if not RENDER_SEATMAP_URL:
+    raise EnvironmentError("Environment variable RENDER_SEATMAP_URL is not set")
+
+# --- GitHub PAT and repo info ---
+GITHUB_TOKEN = os.getenv("GH_PAT")
+if not GITHUB_TOKEN:
+    raise EnvironmentError("Environment variable GH_PAT is not set")
+
+REPO_OWNER = "text2027mail"          # <-- CHANGE to your GitHub username
+REPO_NAME = "usadata2026"             # <-- CHANGE if repo name differs
 
 # --- Concurrency ---
-MAX_WORKERS = 50          # process pool for zip scanning
-CONCURRENCY = 45          # async seatmap requests
+MAX_WORKERS = 50
+CONCURRENCY = 45
 
 # --- Language & format detection ---
 KNOWN_LANGUAGES = [
@@ -74,7 +84,7 @@ def get_random_user_agent():
 def get_random_ip():
     return ".".join(str(random.randint(1,255)) for _ in range(4))
 
-# ================= HEADER BUILDERS (exact same as boxoffice) =================
+# ================= HEADER BUILDERS =================
 
 def get_headers2(zip_code, date_str):
     random_ip = get_random_ip()
@@ -104,7 +114,7 @@ def get_seatmap_headers():
         "Client-IP": random_ip,
     }
 
-# ================= PARSERS (exact same as boxoffice) =================
+# ================= PARSERS =================
 
 def extract_language(amenities):
     lang_priority = []
@@ -218,19 +228,14 @@ def scrape_all_shows_for_date(zip_list, date_str):
 async def fetch_seat(session, show):
     sid = str(show["showtime_id"])
     params = {"showtime_id": sid}
-    headers = get_seatmap_headers()   # optional, can be removed
+    headers = get_seatmap_headers()
     try:
         async with session.get(RENDER_SEATMAP_URL, params=params, headers=headers, timeout=10) as resp:
-            # 1. HTTP-level error
             if resp.status != 200:
                 show["error"] = {"status": resp.status}
                 return
-
-            # 2. Read plain text response
             text = await resp.text()
             text = text.strip()
-
-            # 3. Error indicator: "e" + status code (e.g., e404)
             if text.startswith('e'):
                 try:
                     status_code = int(text[1:])
@@ -238,13 +243,10 @@ async def fetch_seat(session, show):
                     status_code = 500
                 show["error"] = {"status": status_code}
                 return
-
-            # 4. Success: three comma-separated values
             parts = text.split(',')
             if len(parts) != 3:
                 show["error"] = {"status": 500, "reason": "Invalid response format"}
                 return
-
             try:
                 total = int(parts[0].strip())
                 available = int(parts[1].strip())
@@ -252,23 +254,18 @@ async def fetch_seat(session, show):
             except ValueError:
                 show["error"] = {"status": 500, "reason": "Invalid numeric values"}
                 return
-
-            # 5. Sanity checks
             if total == 0:
                 show["error"] = {"status": 500, "reason": "No seats"}
                 return
             if price == 0.0:
                 show["error"] = {"status": 500, "reason": "Ticket price 0"}
                 return
-
-            # 6. Compute derived fields
             sold = total - available
             show["totalSeatSold"] = sold
             show["totalSeatCount"] = total
             show["occupancy"] = round((sold / total) * 100, 2) if total else 0.0
             show["adultTicketPrice"] = price
             show["grossRevenueUSD"] = round(price * sold, 2)
-
     except Exception as e:
         show["error"] = {"exception": str(e)}
 
@@ -284,21 +281,13 @@ async def run_seatmap_fetch(shows):
         for f in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc="Seatmaps"):
             await f
 
-# ================= MERGING LOGIC (same as boxoffice) =================
+# ================= MERGING LOGIC =================
 
 def merge_show(old, new):
-    """
-    Merge two show records.
-    - If new has error, keep old entirely.
-    - Otherwise, keep the higher totalSeatSold (to avoid losing sales).
-    - Recompute derived fields based on chosen sold.
-    """
     if not old:
         return new
     if "error" in new:
-        return old  # keep old if new fetch failed
-
-    # Determine which sold count to use (max)
+        return old
     new_sold = new.get("totalSeatSold", 0)
     old_sold = old.get("totalSeatSold", 0)
     if new_sold > old_sold:
@@ -307,86 +296,110 @@ def merge_show(old, new):
     else:
         chosen = old.copy()
         chosen_sold = old_sold
-
-    # Update derived fields based on chosen sold
     total = chosen.get("totalSeatCount", 0)
     if total and total > 0:
         chosen["occupancy"] = round((chosen_sold / total) * 100, 2)
     else:
         chosen["occupancy"] = 0.0
-
     price = chosen.get("adultTicketPrice", 0.0)
     chosen["grossRevenueUSD"] = round(price * chosen_sold, 2)
     chosen["totalSeatSold"] = chosen_sold
-
     return chosen
 
-# ================= LOAD / SAVE ADVANCE HELPERS =================
+# ================= GITHUB API HELPERS =================
+
+def github_get_file(path):
+    """Return (content_as_string, sha) if file exists, else (None, None)."""
+    url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{path}"
+    headers = {"Authorization": f"token {GITHUB_TOKEN}"}
+    resp = requests.get(url, headers=headers)
+    if resp.status_code == 200:
+        data = resp.json()
+        content = base64.b64decode(data["content"]).decode("utf-8")
+        return content, data["sha"]
+    elif resp.status_code == 404:
+        return None, None
+    else:
+        raise Exception(f"GitHub GET error {resp.status_code}: {resp.text}")
+
+def github_put_file(path, content, sha=None):
+    """Create or update a file. Returns True on success."""
+    url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{path}"
+    headers = {"Authorization": f"token {GITHUB_TOKEN}"}
+    payload = {
+        "message": f"Update {path}",
+        "content": base64.b64encode(content.encode("utf-8")).decode("utf-8"),
+        "sha": sha,
+    }
+    resp = requests.put(url, headers=headers, json=payload)
+    if resp.status_code in (200, 201):
+        return True
+    else:
+        raise Exception(f"GitHub PUT error {resp.status_code}: {resp.text}")
+
+# ================= LOAD / SAVE ADVANCE HELPERS (remote) =================
 
 def load_existing_advance_file(date_obj):
     """
-    Load existing advance file for the given date.
-    Returns a dict: showtime_id -> show dict, and a list of errors (if any).
+    Load existing advance file from remote repository.
+    Returns a dict: showtime_id -> show dict, and a list of errors.
     """
     year = date_obj.strftime("%Y")
     filename = date_obj.strftime("%d-%m.json")
-    filepath = os.path.join("usa-advance", year, filename)
-    if not os.path.exists(filepath):
-        return {}, []
+    path = f"usa-advance/{year}/{filename}"
+    content, _ = github_get_file(path)
+    shows = {}
+    errors = []
+    if content:
+        try:
+            data = json.loads(content)
+            if "shows" in data and isinstance(data["shows"], list):
+                for arr in data["shows"]:
+                    if len(arr) >= 15:
+                        d = {
+                            "showtime_id": arr[0],
+                            "date": arr[1],
+                            "format": arr[2],
+                            "language": arr[3],
+                            "movie_title": arr[4],
+                            "movie_id": arr[5],
+                            "theater_name": arr[6],
+                            "city": arr[7],
+                            "state": arr[8],
+                            "chainName": arr[9],
+                            "totalSeatSold": arr[10],
+                            "totalSeatCount": arr[11],
+                            "occupancy": arr[12],
+                            "adultTicketPrice": arr[13],
+                            "grossRevenueUSD": arr[14],
+                        }
+                        shows[str(arr[0])] = d
+        except Exception as e:
+            print(f"⚠️ Could not parse remote advance file {path}: {e}")
 
-    try:
-        with open(filepath, "r") as f:
-            data = json.load(f)
-        shows = {}
-        errors = []
-        if "shows" in data and isinstance(data["shows"], list):
-            for arr in data["shows"]:
-                if len(arr) >= 15:
-                    d = {
-                        "showtime_id": arr[0],
-                        "date": arr[1],
-                        "format": arr[2],
-                        "language": arr[3],
-                        "movie_title": arr[4],
-                        "movie_id": arr[5],
-                        "theater_name": arr[6],
-                        "city": arr[7],
-                        "state": arr[8],
-                        "chainName": arr[9],
-                        "totalSeatSold": arr[10],
-                        "totalSeatCount": arr[11],
-                        "occupancy": arr[12],
-                        "adultTicketPrice": arr[13],
-                        "grossRevenueUSD": arr[14],
-                    }
-                    shows[str(arr[0])] = d
-        # Also load errors from errors file if exists
-        error_file = os.path.join("usa-advance", year, f"{date_obj.strftime('%d-%m')}_errors.json")
-        if os.path.exists(error_file):
-            try:
-                with open(error_file, "r") as f:
-                    err_data = json.load(f)
-                errors = err_data.get("errors", [])
-            except Exception:
-                pass
-        return shows, errors
-    except Exception as e:
-        print(f"⚠️ Could not load existing advance file {filepath}: {e}")
-        return {}, []
+    # Load errors file (if exists)
+    error_path = f"usa-advance/{year}/{date_obj.strftime('%d-%m')}_errors.json"
+    err_content, _ = github_get_file(error_path)
+    if err_content:
+        try:
+            err_data = json.loads(err_content)
+            errors = err_data.get("errors", [])
+        except Exception:
+            pass
+    return shows, errors
 
 def write_advance_file(date_obj, merged_dict, error_shows):
     """
-    Write merged shows to usa-advance/YYYY/DD-MM.json,
-    and errors to DD-MM_errors.json, logs to DD-MM_logs.json.
+    Write merged shows to remote usa-advance/YYYY/DD-MM.json,
+    errors to DD-MM_errors.json, logs to DD-MM_logs.json.
     """
     if not merged_dict and not error_shows:
         print(f"No data for {date_obj}, skipping.")
         return
 
-    # Convert merged dict to list
     shows = list(merged_dict.values())
 
-    # Deduplicate by showtime_id (just in case)
+    # Deduplicate
     seen = set()
     unique = []
     for s in shows:
@@ -395,7 +408,7 @@ def write_advance_file(date_obj, merged_dict, error_shows):
             seen.add(sid)
             unique.append(s)
 
-    # Build compact show list
+    # Build compact list
     compact = []
     for s in unique:
         compact.append([
@@ -416,7 +429,7 @@ def write_advance_file(date_obj, merged_dict, error_shows):
             s.get("grossRevenueUSD", 0.0),
         ])
 
-    # Movie-wise summary (only successful)
+    # Movie summary
     movie_summary = defaultdict(lambda: {
         "shows": 0,
         "tickets": 0,
@@ -456,35 +469,43 @@ def write_advance_file(date_obj, merged_dict, error_shows):
     }
 
     year = date_obj.strftime("%Y")
-    dir_path = os.path.join("usa-advance", year)
-    os.makedirs(dir_path, exist_ok=True)
+    base_path = f"usa-advance/{year}"
 
-    # Save main file
+    # 1. Main file
     filename = date_obj.strftime("%d-%m.json")
-    filepath = os.path.join(dir_path, filename)
-    with open(filepath, "w") as f:
-        json.dump(output, f, separators=(',', ':'))
+    path = f"{base_path}/{filename}"
+    _, sha = github_get_file(path)
+    github_put_file(path, json.dumps(output, separators=(',', ':')), sha)
+    print(f"💾 Saved {len(unique)} shows to {path}")
 
-    print(f"💾 Saved {len(unique)} shows to {filepath}")
-
-    # Save errors
-    error_file = os.path.join(dir_path, f"{date_obj.strftime('%d-%m')}_errors.json")
+    # 2. Errors file
+    error_path = f"{base_path}/{date_obj.strftime('%d-%m')}_errors.json"
+    _, sha = github_get_file(error_path)
     error_payload = {
         "last_updated": datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %I:%M:%S %p"),
         "errors": error_shows if error_shows else []
     }
-    with open(error_file, "w") as f:
-        json.dump(error_payload, f, indent=2, ensure_ascii=False)
-    print(f"⚠️ Error file saved to {error_file}")
+    github_put_file(error_path, json.dumps(error_payload, indent=2, ensure_ascii=False), sha)
+    print(f"⚠️ Error file saved to {error_path}")
 
-    # Save logs
-    logs_file = os.path.join(dir_path, f"{date_obj.strftime('%d-%m')}_logs.json")
+    # 3. Logs file
+    logs_path = f"{base_path}/{date_obj.strftime('%d-%m')}_logs.json"
+    existing_logs = []
+    content, sha = github_get_file(logs_path)
+    if content:
+        try:
+            existing_logs = json.loads(content)
+            if not isinstance(existing_logs, list):
+                existing_logs = []
+        except Exception:
+            existing_logs = []
+
+    # Compute log entry
     total_gross = 0.0
     total_shows = 0
     total_sold = 0
     total_capacity = 0
     venues = set()
-
     for s in unique:
         if "error" in s:
             continue
@@ -495,7 +516,6 @@ def write_advance_file(date_obj, merged_dict, error_shows):
         venues.add(s.get("theater_name"))
 
     avg_occupancy = round((total_sold / total_capacity) * 100, 2) if total_capacity else 0.0
-
     log_entry = {
         "time": datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %I:%M:%S %p"),
         "total_gross_usd": round(total_gross, 2),
@@ -505,20 +525,9 @@ def write_advance_file(date_obj, merged_dict, error_shows):
         "unique_venues": len(venues),
         "errors_count": len(error_shows) if error_shows else 0,
     }
-
-    existing_logs = []
-    if os.path.exists(logs_file):
-        try:
-            existing_logs = json.load(open(logs_file))
-            if not isinstance(existing_logs, list):
-                existing_logs = []
-        except Exception:
-            existing_logs = []
     existing_logs.append(log_entry)
-    with open(logs_file, "w") as f:
-        json.dump(existing_logs, f, indent=2, ensure_ascii=False)
-
-    print(f"📝 Log entry appended to {logs_file}")
+    github_put_file(logs_path, json.dumps(existing_logs, indent=2, ensure_ascii=False), sha)
+    print(f"📝 Log entry appended to {logs_path}")
 
 # ================= DATE PLANNING =================
 
@@ -550,7 +559,6 @@ def build_date_filter_map():
         if d not in date_filter:
             date_filter[d] = {movie_id}
         elif date_filter[d] is not None:
-            # already a set, add
             date_filter[d].add(movie_id)
         # else: if it's None, keep None (all movies already)
 
@@ -571,7 +579,7 @@ def main():
         else:
             print(f"  {d.strftime('%Y-%m-%d')}: movies {filt}")
 
-    # Load zip codes
+    # Load zip codes from local file
     if not os.path.exists(ZIP_FILE):
         print(f"❌ Missing {ZIP_FILE}")
         return
@@ -582,9 +590,9 @@ def main():
         date_str = scrape_date.strftime("%Y-%m-%d")
         print(f"\n=== Processing date: {date_str} ===")
 
-        # 1. Load existing advance data
+        # 1. Load existing advance data from remote
         existing_shows, existing_errors = load_existing_advance_file(scrape_date)
-        print(f"📂 Loaded {len(existing_shows)} existing shows from advance data.")
+        print(f"📂 Loaded {len(existing_shows)} existing shows from advance data (remote).")
 
         # 2. Scrape fresh showtimes
         raw_shows = scrape_all_shows_for_date(zipcodes, date_str)
@@ -612,9 +620,7 @@ def main():
 
         if not filtered:
             print("  No shows match criteria. Skipping seatmap fetch.")
-            # Still need to keep existing data? We'll just keep existing.
-            # Save merged (which is just existing) - but if we do nothing, we keep the file.
-            # However, we might want to update errors/logs? We'll skip.
+            # We keep existing data (do not overwrite)
             continue
 
         # 6. Fetch seatmap data (modifies shows in-place)
@@ -631,13 +637,12 @@ def main():
             else:
                 if "error" not in fresh:
                     merged_dict[sid] = fresh
-                # else: skip because no data
 
-        # Separate errors from merged
+        # Separate errors
         error_shows = [s for s in merged_dict.values() if "error" in s]
         print(f"  Successful shows: {len(merged_dict) - len(error_shows)}, Errors: {len(error_shows)}")
 
-        # 8. Write merged data
+        # 8. Write merged data to remote
         write_advance_file(scrape_date, merged_dict, error_shows)
 
     print("\n✅ All dates processed.")

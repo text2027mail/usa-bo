@@ -27,7 +27,6 @@ SCRAPE_DATES = [
 
 # --- Custom movies: list of {movie_id, date} ---
 CUSTOM_MOVIES = [
-    {"movie_id": 243375, "date": date(2026, 7, 22)},
     {"movie_id": 243375, "date": date(2026, 7, 23)},
 ]
 

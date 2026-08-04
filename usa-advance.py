@@ -66,8 +66,8 @@ CONCURRENCY = 45
 
 # --- Language & format detection ---
 KNOWN_LANGUAGES = [
-    "English", "Hindi", "Tamil", "Telugu", "Kannada",
-    "Malayalam", "Punjabi", "Gujarati", "Marathi", "Bengali"
+    "Hindi", "Tamil", "Telugu", "Kannada",
+    "Malayalam", "Punjabi", "Gujarati", "Marathi", "Bengali", "English"
 ]
 FORMAT_KEYWORDS = [
     "RPX", "D-Box", "IMAX", "EMX", "Sony Digital Cinema",

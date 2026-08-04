@@ -16,7 +16,7 @@ import base64
 # ================= CONFIGURATION =================
 TARGET_LANGUAGES = ["Hindi", "Tamil", "Telugu", "Malayalam", "Kannada"]
 ZIP_FILE = "zipcodes.txt"
-MAX_WORKERS = 50
+MAX_WORKERS = 30
 CONCURRENCY = 45
 
 # --- Custom movies for today (optional) ---

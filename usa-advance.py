@@ -127,17 +127,50 @@ def get_seatmap_headers():
 # ================= PARSERS =================
 
 def extract_language(amenities):
-    lang_priority = []
+
+    # ---------- old parser ----------
+
     for item in amenities:
+
         lowered = item.lower()
+
         for lang in KNOWN_LANGUAGES:
-            if f"{lang.lower()} language" in lowered:
-                return lang
+
             if lang.lower() in lowered:
-                lang_priority.append((lang, lowered.find(lang.lower())))
-    if lang_priority:
-        lang_priority.sort(key=lambda x: x[1])
-        return lang_priority[0][0]
+
+                return lang
+
+    # ---------- fallback parser ----------
+
+    candidates=[]
+
+    for item in amenities:
+
+        lowered=item.lower()
+
+        for lang in KNOWN_LANGUAGES:
+
+            if f"{lang.lower()} language" in lowered:
+
+                return lang
+
+            if lang.lower() in lowered:
+
+                candidates.append(
+                    (
+                        lang,
+                        lowered.find(lang.lower())
+                    )
+                )
+
+    if candidates:
+
+        candidates.sort(
+            key=lambda x:x[1]
+        )
+
+        return candidates[0][0]
+
     return "Unknown"
 
 def extract_format(amenities, default_format):
@@ -293,48 +326,32 @@ async def run_seatmap_fetch(shows):
 
 # ================= MERGING LOGIC =================
 
-def merge_show(old,new):
+def merge_show(old, new):
 
     if old is None:
         return new
 
-    old_ok = "error" not in old
-    new_ok = "error" not in new
+    old_error = "error" in old
+    new_error = "error" in new
 
     # both failed
-
-    if not old_ok and not new_ok:
-
+    if old_error and new_error:
         return old
 
-    # new success
-
-    if not old_ok and new_ok:
-
+    # old failed, new succeeded
+    if old_error and not new_error:
         return new
 
-    # old success
-
-    if old_ok and not new_ok:
-
+    # old succeeded, new failed
+    if not old_error and new_error:
         return old
 
-    # both success
+    # both succeeded
 
-    oldSold=old.get("totalSeatSold",0)
-    newSold=new.get("totalSeatSold",0)
+    if new.get("totalSeatSold", 0) >= old.get("totalSeatSold", 0):
+        return new
 
-    chosen = new if newSold>=oldSold else old
-
-    chosen["grossRevenueUSD"]=round(
-
-        chosen.get("adultTicketPrice",0)*
-        chosen.get("totalSeatSold",0),
-
-        2
-    )
-
-    return chosen
+    return old
 
 # ================= GITHUB API HELPERS =================
 
@@ -556,61 +573,67 @@ def write_advance_file(date_obj, merged_dict, error_shows):
 # ================= DATE PLANNING =================
 
 def build_date_filter_map():
-    """
-    Returns:
-      movie_filter: dict[date] -> set of movie_ids or None (all movies)
-      extra_langs_map: dict[(date, movie_id)] -> str ("all", "english", "unknown")
-    """
-    movie_filter = {}
-    extra_langs_map = {}
 
-    # 1. Tomorrow if enabled
+    movie_filter = {}
+
+    # Tomorrow
     if FETCH_TOMORROW:
         eastern = ZoneInfo("America/New_York")
         tomorrow = (datetime.now(eastern) + timedelta(days=1)).date()
-        movie_filter[tomorrow] = None  # all movies
+        movie_filter[tomorrow] = None
 
-    # 2. All dates from SCRAPE_DATES
+    # Manual scrape dates
     for d in SCRAPE_DATES:
-        movie_filter[d] = None
+        movie_filter.setdefault(d, None)
 
-    # 3. Custom movies
+    # ------------------------------------------------
+    # FIRST add every custom movie date
+    # ------------------------------------------------
+
     for custom in CUSTOM_MOVIES:
-        movie_id = custom.get("movie_id")
+
         d = custom.get("date")
-        if not movie_id or not d:
+        mid = custom.get("movie_id")
+
+        if not d or not mid:
             continue
 
-        # Extract extra language rule
-        extra_langs = custom.get("add_extra_langs_shows")
-        if extra_langs not in ("all", "english", "unknown"):
-            extra_langs = None  # treat as no extra
-
-        # Determine if rule applies to all dates or just this one
-        apply_to_all = custom.get("extra_langs_for_all_dates", False)
-
-        # Get the list of dates we are going to process (all keys in movie_filter)
-        all_dates = list(movie_filter.keys())
-
-        if apply_to_all:
-            # Apply to all dates that we will scrape
-            for scrape_date in all_dates:
-                if extra_langs:
-                    extra_langs_map[(scrape_date, movie_id)] = extra_langs
-                # If extra_langs is None, we don't add any entry (could remove existing? but we won't)
-        else:
-            # Apply only to the specific date in the entry
-            if extra_langs:
-                extra_langs_map[(d, movie_id)] = extra_langs
-
-        # Also update movie_filter for this date (if not already None)
         if d not in movie_filter:
-            movie_filter[d] = {movie_id}
-        elif movie_filter[d] is not None:
-            movie_filter[d].add(movie_id)
-        # else: if it's None, keep None (all movies already)
 
-    return movie_filter, extra_langs_map
+            movie_filter[d] = {mid}
+
+        elif movie_filter[d] is not None:
+
+            movie_filter[d].add(mid)
+
+    # ------------------------------------------------
+    # NOW create extra_langs_map
+    # ------------------------------------------------
+
+    extra_langs_map = {}
+
+    all_dates = list(movie_filter.keys())
+
+    for custom in CUSTOM_MOVIES:
+
+        movie_id = custom.get("movie_id")
+
+        extra = custom.get("add_extra_langs_shows")
+
+        if extra not in ("all","english","unknown"):
+            continue
+
+        if custom.get("extra_langs_for_all_dates",False):
+
+            for d in all_dates:
+
+                extra_langs_map[(d,movie_id)] = extra
+
+        else:
+
+            extra_langs_map[(custom["date"],movie_id)] = extra
+
+    return movie_filter,extra_langs_map
 
 # ================= MAIN =================
 
@@ -676,11 +699,45 @@ def main():
 
         # 4. Deduplicate fresh shows by showtime_id
         unique_fresh = {}
+        
         for s in lang_filtered:
-            sid = str(s.get("showtime_id"))
-            if sid not in unique_fresh:
+        
+            sid = str(s["showtime_id"])
+        
+            old = unique_fresh.get(sid)
+        
+            if old is None:
+        
                 unique_fresh[sid] = s
+        
+                continue
+        
+            # Prefer known language
+            if old["language"] == "Unknown" and s["language"] != "Unknown":
+        
+                unique_fresh[sid] = s
+        
+                continue
+        
+            # Prefer richer metadata
+            if len(json.dumps(s)) > len(json.dumps(old)):
+        
+                unique_fresh[sid] = s
+                
+                
+                
         lang_filtered = list(unique_fresh.values())
+        from collections import Counter
+        
+        print()
+        
+        print("Language Counts")
+        
+        print(Counter(x["language"] for x in raw_shows))
+        
+        print(Counter(x["language"] for x in lang_filtered))
+        
+        print()
         print(f"  After dedup: {len(lang_filtered)}")
 
         # 5. Filter by movie_filter (if not None)
@@ -700,29 +757,48 @@ def main():
         asyncio.run(run_seatmap_fetch(filtered))
 
         # 7. Merge: start with existing shows
+        # 7. Merge: start with existing shows
         merged_dict = existing_shows.copy()
-
-        # Process fresh shows
-         for fresh in filtered:
          
-             sid = str(fresh["showtime_id"])
+        # ------------------------------------------------------------------
+        # STEP 1
+        # Insert EVERY discovered show first.
+        # This matches the behaviour of the old scraper.
+        # ------------------------------------------------------------------
+        
+        for fresh in filtered:
+        
+            sid = str(fresh["showtime_id"])
          
-             if sid not in merged_dict:
+            if sid not in merged_dict:
          
-                 # Always save newly discovered show,
-                 # even if seatmap failed.
-                 merged_dict[sid] = fresh
+                merged_dict[sid] = fresh
          
-             else:
+        # ------------------------------------------------------------------
+        # STEP 2
+        # Merge seatmap results.
+        # Successful seatmaps replace older data.
+        # Failed seatmaps never overwrite good data.
+        # ------------------------------------------------------------------
          
-                 # Merge with previous data.
-                 merged_dict[sid] = merge_show(
-                     merged_dict[sid],
-                     fresh
-                 )
-
-        # Separate errors
-        error_shows = [s for s in merged_dict.values() if "error" in s]
+        for fresh in filtered:
+         
+            sid = str(fresh["showtime_id"])
+        
+            merged_dict[sid] = merge_show(
+                merged_dict[sid],
+                fresh
+            )
+         
+        # ------------------------------------------------------------------
+        # Build error list
+        # ------------------------------------------------------------------
+         
+        error_shows = [
+            s
+            for s in merged_dict.values()
+            if "error" in s
+        ]
         print(f"  Successful shows: {len(merged_dict) - len(error_shows)}, Errors: {len(error_shows)}")
 
         # 8. Write merged data to remote

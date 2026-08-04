@@ -28,7 +28,8 @@ SCRAPE_DATES = [
 
 # --- Custom movies: list of {movie_id, date} ---
 CUSTOM_MOVIES = [
-    #{"movie_id": 243375, "date": date(2026, 7, 23)},
+    {"movie_id": 244612, "date": date(2026, 8, 25)},
+    {"movie_id": 244612, "date": date(2026, 8, 26)},
 ]
 
 # --- File containing US zip codes (one per line) ---

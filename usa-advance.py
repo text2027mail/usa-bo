@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
 from collections import defaultdict
 import base64
+from typing import Dict, List, Optional, Any, Tuple, Set
 
 # ================= CONFIGURATION =================
 
@@ -22,8 +23,8 @@ FETCH_TOMORROW = True
 
 # --- Dates for which we want ALL movies (target languages) ---
 SCRAPE_DATES = [
-     date(2026, 8, 6),
-     date(2026, 8, 8),
+    date(2026, 8, 6),
+    date(2026, 8, 8),
 ]
 
 # --- Custom movies with extra language options ---
@@ -31,11 +32,7 @@ SCRAPE_DATES = [
 #   movie_id, date (required)
 #   add_extra_langs_shows: "all" | "english" | "unknown" (optional)
 #   extra_langs_for_all_dates: bool (default False)
-
-
 CUSTOM_MOVIES = [
-#   {"movie_id": 244612, "date": date(2026, 8, 25)},
-#   {"movie_id": 244612, "date": date(2026, 8, 26), "add_extra_langs_shows": "english"},
     {"movie_id": 244612, "date": date(2026, 8, 25), "add_extra_langs_shows": "all", "extra_langs_for_all_dates": True},
     {"movie_id": 244612, "date": date(2026, 8, 26), "add_extra_langs_shows": "all", "extra_langs_for_all_dates": True},
 ]
@@ -73,6 +70,9 @@ FORMAT_KEYWORDS = [
     "RPX", "D-Box", "IMAX", "EMX", "Sony Digital Cinema",
     "4DX", "ScreenX", "Cinemark XD", "Dolby Cinema"
 ]
+
+# --- Debug logging (set to True for extra diagnostics) ---
+DEBUG = False
 
 # ================= SPOOFING HELPERS =================
 
@@ -126,27 +126,37 @@ def get_seatmap_headers():
 
 # ================= PARSERS =================
 
-def extract_language(amenities):
-    lang_priority = []
+def extract_language(amenities: List[str]) -> str:
+    """
+    Robust language detection.
+    First, look for explicit patterns like "Language: Hindi" or "Hindi Language".
+    Then fallback to simple substring match over known languages.
+    Returns the first match, or "Unknown".
+    """
     for item in amenities:
-        lowered = item.lower()
+        lower_item = item.lower()
+        # Check for explicit patterns
         for lang in KNOWN_LANGUAGES:
-            if f"{lang.lower()} language" in lowered:
+            lang_lower = lang.lower()
+            # Pattern: "Language: Hindi", "Audio: Hindi", "Hindi Language", etc.
+            if f"{lang_lower} language" in lower_item or f"language: {lang_lower}" in lower_item or f"audio: {lang_lower}" in lower_item:
                 return lang
-            if lang.lower() in lowered:
-                lang_priority.append((lang, lowered.find(lang.lower())))
-    if lang_priority:
-        lang_priority.sort(key=lambda x: x[1])
-        return lang_priority[0][0]
+    # Fallback to simple contains
+    for item in amenities:
+        lower_item = item.lower()
+        for lang in KNOWN_LANGUAGES:
+            if lang.lower() in lower_item:
+                return lang
     return "Unknown"
 
-def extract_format(amenities, default_format):
+def extract_format(amenities: List[str], default_format: str) -> str:
     for keyword in FORMAT_KEYWORDS:
         if any(keyword.lower() in a.lower() for a in amenities):
             return keyword
     return default_format
 
-def prepare_showtimes(movie):
+def prepare_showtimes(movie: Dict) -> List[Dict]:
+    """Extract showtimes from a movie object with language and format."""
     out = []
     movie_title = movie.get("title", "Unknown")
     movie_id = movie.get("id")
@@ -172,7 +182,7 @@ def prepare_showtimes(movie):
 
 # ================= THEATER SCRAPER (MULTIPROCESSING) =================
 
-def get_theaters(zip_code, date_str):
+def get_theaters(zip_code: str, date_str: str) -> Dict:
     url = "https://www.fandango.com/napi/theaterswithshowtimes"
     params = {
         "zipCode": zip_code,
@@ -187,10 +197,11 @@ def get_theaters(zip_code, date_str):
         if r.status_code == 200:
             return r.json()
     except Exception as e:
-        print(f"❌ Error fetching theaters for ZIP {zip_code}: {e}")
+        if DEBUG:
+            print(f"❌ Error fetching theaters for ZIP {zip_code}: {e}")
     return {}
 
-def process_zip(args):
+def process_zip(args: Tuple[str, str]) -> List[Dict]:
     zip_code, date_str = args
     data = get_theaters(zip_code, date_str)
     theaters = []
@@ -209,7 +220,7 @@ def process_zip(args):
                 })
     return theaters
 
-def scrape_all_shows_for_date(zip_list, date_str):
+def scrape_all_shows_for_date(zip_list: List[str], date_str: str) -> List[Dict]:
     args = [(z, date_str) for z in zip_list]
     all_theaters = []
     with ProcessPoolExecutor(MAX_WORKERS) as exe:
@@ -235,7 +246,7 @@ def scrape_all_shows_for_date(zip_list, date_str):
 
 # ================= SEATMAP FETCHING (ASYNC) via Render proxy =================
 
-async def fetch_seat(session, show):
+async def fetch_seat(session: aiohttp.ClientSession, show: Dict) -> None:
     sid = str(show["showtime_id"])
     params = {"showtime_id": sid}
     headers = get_seatmap_headers()
@@ -276,10 +287,14 @@ async def fetch_seat(session, show):
             show["occupancy"] = round((sold / total) * 100, 2) if total else 0.0
             show["adultTicketPrice"] = price
             show["grossRevenueUSD"] = round(price * sold, 2)
+            # Remove any previous error
+            show.pop("error", None)
     except Exception as e:
         show["error"] = {"exception": str(e)}
 
-async def run_seatmap_fetch(shows):
+async def run_seatmap_fetch(shows: List[Dict]) -> None:
+    if not shows:
+        return
     connector = aiohttp.TCPConnector(ssl=ssl.create_default_context())
     retry = ExponentialRetry(attempts=3)
     async with RetryClient(connector=connector, retry_options=retry) as session:
@@ -291,34 +306,87 @@ async def run_seatmap_fetch(shows):
         for f in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc="Seatmaps"):
             await f
 
-# ================= MERGING LOGIC =================
+# ================= MERGING AND DEDUPLICATION =================
 
-def merge_show(old, new):
-    if not old:
-        return new
-    if "error" in new:
-        return old
-    new_sold = new.get("totalSeatSold", 0)
-    old_sold = old.get("totalSeatSold", 0)
-    if new_sold > old_sold:
-        chosen = new.copy()
-        chosen_sold = new_sold
-    else:
+def merge_show_metadata(old: Optional[Dict], new: Dict) -> Dict:
+    """
+    Merge two show dictionaries, preferring the one with better data.
+    Rules:
+    - Prefer show with successful seatmap (no error) over one with error.
+    - If both have seatmap, prefer higher totalSeatSold.
+    - Keep the best language/format/metadata.
+    """
+    if old is None:
+        return new.copy()
+
+    old_has_seatmap = "totalSeatSold" in old and "error" not in old
+    new_has_seatmap = "totalSeatSold" in new and "error" not in new
+
+    # If one has error and the other doesn't, pick the successful one
+    if old_has_seatmap and not new_has_seatmap:
         chosen = old.copy()
-        chosen_sold = old_sold
-    total = chosen.get("totalSeatCount", 0)
-    if total and total > 0:
-        chosen["occupancy"] = round((chosen_sold / total) * 100, 2)
+    elif new_has_seatmap and not old_has_seatmap:
+        chosen = new.copy()
+    elif old_has_seatmap and new_has_seatmap:
+        # Both have seatmap, compare sold
+        if new.get("totalSeatSold", 0) > old.get("totalSeatSold", 0):
+            chosen = new.copy()
+        else:
+            chosen = old.copy()
     else:
-        chosen["occupancy"] = 0.0
-    price = chosen.get("adultTicketPrice", 0.0)
-    chosen["grossRevenueUSD"] = round(price * chosen_sold, 2)
-    chosen["totalSeatSold"] = chosen_sold
+        # Neither has seatmap, or both have errors
+        # Prefer the one with more complete metadata (language not Unknown, etc.)
+        # Fallback: keep old
+        chosen = old.copy()
+        # But if new has better language, update fields
+        if new.get("language") != "Unknown" and old.get("language") == "Unknown":
+            chosen["language"] = new["language"]
+        # Similarly format
+        if new.get("format") != "Standard" and old.get("format") == "Standard":
+            chosen["format"] = new["format"]
+        # Keep error if present (new might have fresh error, but we keep old error if exists)
+        if "error" in new and "error" not in chosen:
+            chosen["error"] = new["error"]
+
+    # Ensure we have the latest metadata from new if new is better
+    # For fields like movie_title, theater_name, etc., we can take from new if it has non-empty
+    for field in ["movie_title", "theater_name", "city", "state", "chainName", "format", "language"]:
+        if new.get(field) and not chosen.get(field):
+            chosen[field] = new[field]
+        elif new.get(field) and chosen.get(field) and new[field] != "Unknown" and chosen[field] == "Unknown":
+            chosen[field] = new[field]
+
+    # Recalculate occupancy and gross based on chosen sold/total/price
+    if "totalSeatSold" in chosen and "totalSeatCount" in chosen:
+        sold = chosen["totalSeatSold"]
+        total = chosen["totalSeatCount"]
+        if total > 0:
+            chosen["occupancy"] = round((sold / total) * 100, 2)
+        else:
+            chosen["occupancy"] = 0.0
+        price = chosen.get("adultTicketPrice", 0.0)
+        chosen["grossRevenueUSD"] = round(price * sold, 2)
     return chosen
+
+def deduplicate_shows(shows: List[Dict]) -> Dict[str, Dict]:
+    """
+    Deduplicate list of shows by showtime_id, merging metadata.
+    Returns dict {showtime_id: merged_show}.
+    """
+    unique = {}
+    for s in shows:
+        sid = str(s.get("showtime_id"))
+        if not sid:
+            continue
+        if sid in unique:
+            unique[sid] = merge_show_metadata(unique[sid], s)
+        else:
+            unique[sid] = s.copy()
+    return unique
 
 # ================= GITHUB API HELPERS =================
 
-def github_get_file(path):
+def github_get_file(path: str) -> Tuple[Optional[str], Optional[str]]:
     """Return (content_as_string, sha) if file exists, else (None, None)."""
     url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{path}"
     headers = {"Authorization": f"token {GITHUB_TOKEN}"}
@@ -332,7 +400,7 @@ def github_get_file(path):
     else:
         raise Exception(f"GitHub GET error {resp.status_code}: {resp.text}")
 
-def github_put_file(path, content, sha=None):
+def github_put_file(path: str, content: str, sha: Optional[str] = None) -> bool:
     """Create or update a file. Returns True on success."""
     url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{path}"
     headers = {"Authorization": f"token {GITHUB_TOKEN}"}
@@ -349,7 +417,7 @@ def github_put_file(path, content, sha=None):
 
 # ================= LOAD / SAVE ADVANCE HELPERS (remote) =================
 
-def load_existing_advance_file(date_obj):
+def load_existing_advance_file(date_obj: date) -> Tuple[Dict[str, Dict], List[Dict]]:
     """
     Load existing advance file from remote repository.
     Returns a dict: showtime_id -> show dict, and a list of errors.
@@ -398,7 +466,7 @@ def load_existing_advance_file(date_obj):
             pass
     return shows, errors
 
-def write_advance_file(date_obj, merged_dict, error_shows):
+def write_advance_file(date_obj: date, merged_dict: Dict[str, Dict], error_shows: List[Dict]) -> None:
     """
     Write merged shows to remote usa-advance/YYYY/DD-MM.json,
     errors to DD-MM_errors.json, logs to DD-MM_logs.json.
@@ -409,18 +477,9 @@ def write_advance_file(date_obj, merged_dict, error_shows):
 
     shows = list(merged_dict.values())
 
-    # Deduplicate
-    seen = set()
-    unique = []
-    for s in shows:
-        sid = str(s.get("showtime_id"))
-        if sid not in seen:
-            seen.add(sid)
-            unique.append(s)
-
-    # Build compact list
+    # Build compact list (same order as before)
     compact = []
-    for s in unique:
+    for s in shows:
         compact.append([
             s.get("showtime_id"),
             s.get("date"),
@@ -447,7 +506,7 @@ def write_advance_file(date_obj, merged_dict, error_shows):
         "gross": 0.0,
         "occupancy_sum": 0.0,
     })
-    for s in unique:
+    for s in shows:
         if "error" in s:
             continue
         movie_id = s.get("movie_id")
@@ -486,7 +545,7 @@ def write_advance_file(date_obj, merged_dict, error_shows):
     path = f"{base_path}/{filename}"
     _, sha = github_get_file(path)
     github_put_file(path, json.dumps(output, separators=(',', ':')), sha)
-    print(f"💾 Saved {len(unique)} shows to {path}")
+    print(f"💾 Saved {len(compact)} shows to {path}")
 
     # 2. Errors file
     error_path = f"{base_path}/{date_obj.strftime('%d-%m')}_errors.json"
@@ -535,7 +594,7 @@ def write_advance_file(date_obj, merged_dict, error_shows):
 
 # ================= DATE PLANNING =================
 
-def build_date_filter_map():
+def build_date_filter_map() -> Tuple[Dict[date, Optional[Set[int]]], Dict[Tuple[date, int], str]]:
     """
     Returns:
       movie_filter: dict[date] -> set of movie_ids or None (all movies)
@@ -543,58 +602,54 @@ def build_date_filter_map():
     """
     movie_filter = {}
     extra_langs_map = {}
+    custom_entries = []  # store (movie_id, date, extra_rule, apply_to_all)
 
     # 1. Tomorrow if enabled
     if FETCH_TOMORROW:
         eastern = ZoneInfo("America/New_York")
         tomorrow = (datetime.now(eastern) + timedelta(days=1)).date()
-        movie_filter[tomorrow] = None  # all movies
+        movie_filter[tomorrow] = None
 
     # 2. All dates from SCRAPE_DATES
     for d in SCRAPE_DATES:
         movie_filter[d] = None
 
-    # 3. Custom movies
+    # 3. Collect custom movies
     for custom in CUSTOM_MOVIES:
         movie_id = custom.get("movie_id")
         d = custom.get("date")
-        if not movie_id or not d:
-            continue
-
-        # Extract extra language rule
-        extra_langs = custom.get("add_extra_langs_shows")
-        if extra_langs not in ("all", "english", "unknown"):
-            extra_langs = None  # treat as no extra
-
-        # Determine if rule applies to all dates or just this one
+        extra = custom.get("add_extra_langs_shows")
         apply_to_all = custom.get("extra_langs_for_all_dates", False)
+        if movie_id and d:
+            # Add date to filter
+            if d not in movie_filter:
+                movie_filter[d] = {movie_id}
+            elif movie_filter[d] is not None:
+                movie_filter[d].add(movie_id)
+            # Store for later processing of extra rules
+            if extra in ("all", "english", "unknown"):
+                custom_entries.append((movie_id, d, extra, apply_to_all))
 
-        # Get the list of dates we are going to process (all keys in movie_filter)
-        all_dates = list(movie_filter.keys())
-
+    # Now we have all dates. Apply extra rules.
+    for movie_id, d, extra, apply_to_all in custom_entries:
         if apply_to_all:
-            # Apply to all dates that we will scrape
-            for scrape_date in all_dates:
-                if extra_langs:
-                    extra_langs_map[(scrape_date, movie_id)] = extra_langs
-                # If extra_langs is None, we don't add any entry (could remove existing? but we won't)
+            # Apply to every date in movie_filter
+            for date_key in movie_filter.keys():
+                # Add movie to filter for this date if not None
+                if movie_filter[date_key] is not None:
+                    movie_filter[date_key].add(movie_id)
+                # Set extra rule
+                extra_langs_map[(date_key, movie_id)] = extra
         else:
-            # Apply only to the specific date in the entry
-            if extra_langs:
-                extra_langs_map[(d, movie_id)] = extra_langs
-
-        # Also update movie_filter for this date (if not already None)
-        if d not in movie_filter:
-            movie_filter[d] = {movie_id}
-        elif movie_filter[d] is not None:
-            movie_filter[d].add(movie_id)
-        # else: if it's None, keep None (all movies already)
+            # Apply only to its own date
+            extra_langs_map[(d, movie_id)] = extra
+            # (movie already added to filter for its own date)
 
     return movie_filter, extra_langs_map
 
 # ================= MAIN =================
 
-def main():
+def main() -> None:
     movie_filter, extra_langs_map = build_date_filter_map()
     if not movie_filter:
         print("No dates to scrape. Enable FETCH_TOMORROW, set SCRAPE_DATES, or add CUSTOM_MOVIES.")
@@ -628,74 +683,87 @@ def main():
 
         # 2. Scrape fresh showtimes
         raw_shows = scrape_all_shows_for_date(zipcodes, date_str)
+        if DEBUG:
+            print(f"Raw shows scraped: {len(raw_shows)}")
+            # Language distribution
+            lang_counts = defaultdict(int)
+            for s in raw_shows:
+                lang_counts[s.get("language", "Unknown")] += 1
+            print("Language distribution (raw):", dict(lang_counts))
 
-        # 3. Filter by language (respect extra_langs_map)
-        lang_filtered = []
-        for s in raw_shows:
+        # 3. Deduplicate raw shows intelligently
+        unique_raw = deduplicate_shows(raw_shows)
+        if DEBUG:
+            print(f"After dedup: {len(unique_raw)} unique showtime_ids")
+
+        # 4. Apply language rules and movie filter
+        filtered = []
+        for sid, s in unique_raw.items():
             mid = s.get("movie_id")
             lang = s.get("language")
             extra = extra_langs_map.get((scrape_date, mid))
 
+            # Determine if this show passes language filter
+            lang_ok = False
             if extra == "all":
-                # Include regardless of language
-                lang_filtered.append(s)
+                lang_ok = True
             elif extra == "english":
-                # Include if language is in TARGET_LANGUAGES or "English"
-                if lang in TARGET_LANGUAGES or lang == "English":
-                    lang_filtered.append(s)
+                lang_ok = (lang in TARGET_LANGUAGES or lang == "English")
             elif extra == "unknown":
-                # Include if language is in TARGET_LANGUAGES or "Unknown"
-                if lang in TARGET_LANGUAGES or lang == "Unknown":
-                    lang_filtered.append(s)
+                lang_ok = (lang in TARGET_LANGUAGES or lang == "Unknown")
             else:
-                # Default: only TARGET_LANGUAGES
-                if lang in TARGET_LANGUAGES:
-                    lang_filtered.append(s)
+                lang_ok = (lang in TARGET_LANGUAGES)
 
-        print(f"  Raw shows: {len(raw_shows)}, after language filter: {len(lang_filtered)}")
+            if not lang_ok:
+                continue
 
-        # 4. Deduplicate fresh shows by showtime_id
-        unique_fresh = {}
-        for s in lang_filtered:
-            sid = str(s.get("showtime_id"))
-            if sid not in unique_fresh:
-                unique_fresh[sid] = s
-        lang_filtered = list(unique_fresh.values())
-        print(f"  After dedup: {len(lang_filtered)}")
+            # Apply movie filter
+            if filt is not None and mid not in filt:
+                continue
 
-        # 5. Filter by movie_filter (if not None)
-        if filt is not None:
-            filtered = [s for s in lang_filtered if s.get("movie_id") in filt]
-            print(f"  After movie filter (only {filt}): {len(filtered)}")
-        else:
-            filtered = lang_filtered
-            print(f"  No movie filter (all target languages + extra langs): {len(filtered)}")
+            filtered.append(s)
 
-        if not filtered:
-            print("  No shows match criteria. Skipping seatmap fetch.")
-            # We keep existing data (do not overwrite)
-            continue
+        if DEBUG:
+            print(f"After language + movie filter: {len(filtered)} shows")
+            # Language distribution after filter
+            lang_counts = defaultdict(int)
+            for s in filtered:
+                lang_counts[s.get("language", "Unknown")] += 1
+            print("Language distribution (filtered):", dict(lang_counts))
 
-        # 6. Fetch seatmap data (modifies shows in-place)
-        asyncio.run(run_seatmap_fetch(filtered))
-
-        # 7. Merge: start with existing shows
+        # 5. Merge discovered shows into existing dict
         merged_dict = existing_shows.copy()
+        for s in filtered:
+            sid = str(s.get("showtime_id"))
+            merged_dict[sid] = merge_show_metadata(merged_dict.get(sid), s)
 
-        # Process fresh shows
-        for fresh in filtered:
-            sid = str(fresh.get("showtime_id"))
-            if sid in merged_dict:
-                merged_dict[sid] = merge_show(merged_dict[sid], fresh)
-            else:
-                if "error" not in fresh:
-                    merged_dict[sid] = fresh
+        # 6. Determine which shows need seatmap fetch
+        to_fetch = []
+        for sid, s in merged_dict.items():
+            # Fetch if we don't have seatmap data (no totalSeatSold) or we have an error
+            if "totalSeatSold" not in s or "error" in s:
+                to_fetch.append(s)
 
-        # Separate errors
+        if DEBUG:
+            print(f"Shows needing seatmap fetch: {len(to_fetch)}")
+
+        if to_fetch:
+            # 7. Fetch seatmaps for those shows
+            asyncio.run(run_seatmap_fetch(to_fetch))
+
+            # 8. Update merged_dict with fetched results (merge again)
+            for s in to_fetch:
+                sid = str(s.get("showtime_id"))
+                merged_dict[sid] = merge_show_metadata(merged_dict.get(sid), s)
+
+        # 9. Separate errors
         error_shows = [s for s in merged_dict.values() if "error" in s]
-        print(f"  Successful shows: {len(merged_dict) - len(error_shows)}, Errors: {len(error_shows)}")
+        if DEBUG:
+            successful = len(merged_dict) - len(error_shows)
+            print(f"Seatmap success: {successful}, failures: {len(error_shows)}")
+            print(f"Total shows in merged dict: {len(merged_dict)}")
 
-        # 8. Write merged data to remote
+        # 10. Write merged data to remote
         write_advance_file(scrape_date, merged_dict, error_shows)
 
     print("\n✅ All dates processed.")

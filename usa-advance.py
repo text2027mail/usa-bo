@@ -26,10 +26,18 @@ SCRAPE_DATES = [
      date(2026, 8, 8),
 ]
 
-# --- Custom movies: list of {movie_id, date} ---
+# --- Custom movies with extra language options ---
+# Each entry can have:
+#   movie_id, date (required)
+#   add_extra_langs_shows: "all" | "english" | "unknown" (optional)
+#   extra_langs_for_all_dates: bool (default False)
+
+
 CUSTOM_MOVIES = [
-    {"movie_id": 244612, "date": date(2026, 8, 25)},
-    {"movie_id": 244612, "date": date(2026, 8, 26)},
+#   {"movie_id": 244612, "date": date(2026, 8, 25)},
+#   {"movie_id": 244612, "date": date(2026, 8, 26), "add_extra_langs_shows": "english"},
+    {"movie_id": 244612, "date": date(2026, 8, 25), "add_extra_langs_shows": "all", "extra_langs_for_all_dates": True},
+    {"movie_id": 244612, "date": date(2026, 8, 26), "add_extra_langs_shows": "all", "extra_langs_for_all_dates": True},
 ]
 
 # --- File containing US zip codes (one per line) ---
@@ -431,7 +439,7 @@ def write_advance_file(date_obj, merged_dict, error_shows):
             s.get("grossRevenueUSD", 0.0),
         ])
 
-    # Movie summary
+    # Movie summary (for main file)
     movie_summary = defaultdict(lambda: {
         "shows": 0,
         "tickets": 0,
@@ -490,7 +498,7 @@ def write_advance_file(date_obj, merged_dict, error_shows):
     github_put_file(error_path, json.dumps(error_payload, indent=2, ensure_ascii=False), sha)
     print(f"⚠️ Error file saved to {error_path}")
 
-    # 3. Logs file
+    # 3. Logs file (per‑movie logs)
     logs_path = f"{base_path}/{date_obj.strftime('%d-%m')}_logs.json"
     existing_logs = []
     content, sha = github_get_file(logs_path)
@@ -502,55 +510,49 @@ def write_advance_file(date_obj, merged_dict, error_shows):
         except Exception:
             existing_logs = []
 
-    # Compute log entry
-    total_gross = 0.0
-    total_shows = 0
-    total_sold = 0
-    total_capacity = 0
-    venues = set()
-    for s in unique:
-        if "error" in s:
-            continue
-        total_gross += s.get("grossRevenueUSD", 0.0)
-        total_shows += 1
-        total_sold += s.get("totalSeatSold", 0)
-        total_capacity += s.get("totalSeatCount", 0)
-        venues.add(s.get("theater_name"))
+    # Build per‑movie log entries
+    movie_logs = []
+    for (movie_id, movie_title), data in sorted(movie_summary.items(), key=lambda x: x[1]["gross"], reverse=True):
+        occupancy_avg = round(data["occupancy_sum"] / data["shows"], 2) if data["shows"] else 0.0
+        movie_logs.append({
+            "movie_id": movie_id,
+            "movie_title": movie_title,
+            "shows": data["shows"],
+            "tickets_sold": data["tickets"],
+            "total_seats": data["seats"],
+            "gross_usd": round(data["gross"], 2),
+            "avg_occupancy": occupancy_avg,
+        })
 
-    avg_occupancy = round((total_sold / total_capacity) * 100, 2) if total_capacity else 0.0
     log_entry = {
         "time": datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %I:%M:%S %p"),
-        "total_gross_usd": round(total_gross, 2),
-        "total_shows": total_shows,
-        "avg_occupancy": avg_occupancy,
-        "tickets_sold": total_sold,
-        "unique_venues": len(venues),
         "errors_count": len(error_shows) if error_shows else 0,
+        "movies": movie_logs,
     }
     existing_logs.append(log_entry)
     github_put_file(logs_path, json.dumps(existing_logs, indent=2, ensure_ascii=False), sha)
-    print(f"📝 Log entry appended to {logs_path}")
+    print(f"📝 Per‑movie log entries appended to {logs_path}")
 
 # ================= DATE PLANNING =================
 
 def build_date_filter_map():
     """
-    Returns a dict: date -> set of movie_ids (or None for all movies).
-    If multiple sources give the same date, the most inclusive wins:
-      - if any source says "all movies" (None), set to None.
-      - otherwise merge sets of movie_ids.
+    Returns:
+      movie_filter: dict[date] -> set of movie_ids or None (all movies)
+      extra_langs_map: dict[(date, movie_id)] -> str ("all", "english", "unknown")
     """
-    date_filter = {}
+    movie_filter = {}
+    extra_langs_map = {}
 
     # 1. Tomorrow if enabled
     if FETCH_TOMORROW:
         eastern = ZoneInfo("America/New_York")
         tomorrow = (datetime.now(eastern) + timedelta(days=1)).date()
-        date_filter[tomorrow] = None  # all movies
+        movie_filter[tomorrow] = None  # all movies
 
     # 2. All dates from SCRAPE_DATES
     for d in SCRAPE_DATES:
-        date_filter[d] = None
+        movie_filter[d] = None
 
     # 3. Custom movies
     for custom in CUSTOM_MOVIES:
@@ -558,28 +560,56 @@ def build_date_filter_map():
         d = custom.get("date")
         if not movie_id or not d:
             continue
-        if d not in date_filter:
-            date_filter[d] = {movie_id}
-        elif date_filter[d] is not None:
-            date_filter[d].add(movie_id)
+
+        # Extract extra language rule
+        extra_langs = custom.get("add_extra_langs_shows")
+        if extra_langs not in ("all", "english", "unknown"):
+            extra_langs = None  # treat as no extra
+
+        # Determine if rule applies to all dates or just this one
+        apply_to_all = custom.get("extra_langs_for_all_dates", False)
+
+        # Get the list of dates we are going to process (all keys in movie_filter)
+        all_dates = list(movie_filter.keys())
+
+        if apply_to_all:
+            # Apply to all dates that we will scrape
+            for scrape_date in all_dates:
+                if extra_langs:
+                    extra_langs_map[(scrape_date, movie_id)] = extra_langs
+                # If extra_langs is None, we don't add any entry (could remove existing? but we won't)
+        else:
+            # Apply only to the specific date in the entry
+            if extra_langs:
+                extra_langs_map[(d, movie_id)] = extra_langs
+
+        # Also update movie_filter for this date (if not already None)
+        if d not in movie_filter:
+            movie_filter[d] = {movie_id}
+        elif movie_filter[d] is not None:
+            movie_filter[d].add(movie_id)
         # else: if it's None, keep None (all movies already)
 
-    return date_filter
+    return movie_filter, extra_langs_map
 
 # ================= MAIN =================
 
 def main():
-    date_filter = build_date_filter_map()
-    if not date_filter:
+    movie_filter, extra_langs_map = build_date_filter_map()
+    if not movie_filter:
         print("No dates to scrape. Enable FETCH_TOMORROW, set SCRAPE_DATES, or add CUSTOM_MOVIES.")
         return
 
     print("📅 Scraping plan:")
-    for d, filt in sorted(date_filter.items()):
+    for d, filt in sorted(movie_filter.items()):
         if filt is None:
             print(f"  {d.strftime('%Y-%m-%d')}: ALL movies (target languages)")
         else:
             print(f"  {d.strftime('%Y-%m-%d')}: movies {filt}")
+        # Show extra language rules for that date
+        for (date_key, movie_id), langs in extra_langs_map.items():
+            if date_key == d:
+                print(f"    -> Extra langs for movie {movie_id}: {langs}")
 
     # Load zip codes from local file
     if not os.path.exists(ZIP_FILE):
@@ -588,7 +618,7 @@ def main():
     zipcodes = open(ZIP_FILE).read().splitlines()
     print(f"✅ {len(zipcodes)} ZIPs loaded.")
 
-    for scrape_date, movie_filter in sorted(date_filter.items()):
+    for scrape_date, filt in sorted(movie_filter.items()):
         date_str = scrape_date.strftime("%Y-%m-%d")
         print(f"\n=== Processing date: {date_str} ===")
 
@@ -599,8 +629,29 @@ def main():
         # 2. Scrape fresh showtimes
         raw_shows = scrape_all_shows_for_date(zipcodes, date_str)
 
-        # 3. Filter by target languages
-        lang_filtered = [s for s in raw_shows if s.get("language") in TARGET_LANGUAGES]
+        # 3. Filter by language (respect extra_langs_map)
+        lang_filtered = []
+        for s in raw_shows:
+            mid = s.get("movie_id")
+            lang = s.get("language")
+            extra = extra_langs_map.get((scrape_date, mid))
+
+            if extra == "all":
+                # Include regardless of language
+                lang_filtered.append(s)
+            elif extra == "english":
+                # Include if language is in TARGET_LANGUAGES or "English"
+                if lang in TARGET_LANGUAGES or lang == "English":
+                    lang_filtered.append(s)
+            elif extra == "unknown":
+                # Include if language is in TARGET_LANGUAGES or "Unknown"
+                if lang in TARGET_LANGUAGES or lang == "Unknown":
+                    lang_filtered.append(s)
+            else:
+                # Default: only TARGET_LANGUAGES
+                if lang in TARGET_LANGUAGES:
+                    lang_filtered.append(s)
+
         print(f"  Raw shows: {len(raw_shows)}, after language filter: {len(lang_filtered)}")
 
         # 4. Deduplicate fresh shows by showtime_id
@@ -613,12 +664,12 @@ def main():
         print(f"  After dedup: {len(lang_filtered)}")
 
         # 5. Filter by movie_filter (if not None)
-        if movie_filter is not None:
-            filtered = [s for s in lang_filtered if s.get("movie_id") in movie_filter]
-            print(f"  After movie filter (only {movie_filter}): {len(filtered)}")
+        if filt is not None:
+            filtered = [s for s in lang_filtered if s.get("movie_id") in filt]
+            print(f"  After movie filter (only {filt}): {len(filtered)}")
         else:
             filtered = lang_filtered
-            print(f"  No movie filter (all target languages): {len(filtered)}")
+            print(f"  No movie filter (all target languages + extra langs): {len(filtered)}")
 
         if not filtered:
             print("  No shows match criteria. Skipping seatmap fetch.")

@@ -36,7 +36,7 @@ SCRAPE_DATES = [
 CUSTOM_MOVIES = [
 #   {"movie_id": 244612, "date": date(2026, 8, 25)},
 #   {"movie_id": 244612, "date": date(2026, 8, 26), "add_extra_langs_shows": "english"},
-    {"movie_id": 244612, "date": date(2026, 8, 25), "add_extra_langs_shows": "all", "extra_langs_for_all_dates": True},
+#    {"movie_id": 244612, "date": date(2026, 8, 25), "add_extra_langs_shows": "all", "extra_langs_for_all_dates": True},
     {"movie_id": 244612, "date": date(2026, 8, 26), "add_extra_langs_shows": "all", "extra_langs_for_all_dates": True},
 ]
 
@@ -729,40 +729,15 @@ def main():
         lang_filtered = list(unique_fresh.values())
         from collections import Counter
         
-        print("\n========== LANGUAGE DEBUG ==========")
+        print()
         
-        print("Raw language counts:")
+        print("Language Counts")
+        
         print(Counter(x["language"] for x in raw_shows))
         
-        print("\nAfter language filter:")
         print(Counter(x["language"] for x in lang_filtered))
         
-        print("\nDropped after language filter:")
-        
-        filtered_ids = {
-            str(x["showtime_id"])
-            for x in lang_filtered
-        }
-        
-        dropped = 0
-        
-        for show in raw_shows:
-        
-            if str(show["showtime_id"]) not in filtered_ids:
-        
-                dropped += 1
-        
-                print(
-                    f"  {show['showtime_id']} | "
-                    f"{show['movie_title']} | "
-                    f"{show['language']} | "
-                    f"{show['theater_name']}"
-                )
-        
-        if dropped == 0:
-            print("  None")
-        
-        print("====================================\n")
+        print()
         print(f"  After dedup: {len(lang_filtered)}")
 
         # 5. Filter by movie_filter (if not None)
@@ -780,40 +755,6 @@ def main():
 
         # 6. Fetch seatmap data (modifies shows in-place)
         asyncio.run(run_seatmap_fetch(filtered))
-        
-        print("\n========== SEATMAP DEBUG ==========")
-        
-        success = 0
-        failed = 0
-        
-        for s in filtered:
-        
-            if "error" in s:
-        
-                failed += 1
-        
-                print(
-                    f"FAIL | {s['showtime_id']} | "
-                    f"{s['theater_name']} | "
-                    f"{s['error']}"
-                )
-        
-            else:
-        
-                success += 1
-        
-                print(
-                    f"OK   | {s['showtime_id']} | "
-                    f"{s['theater_name']} | "
-                    f"{s['totalSeatSold']} sold"
-                )
-        
-        print()
-        
-        print("Seatmap Success :", success)
-        print("Seatmap Failed  :", failed)
-        
-        print("===================================\n")
 
         # 7. Merge: start with existing shows
         # 7. Merge: start with existing shows

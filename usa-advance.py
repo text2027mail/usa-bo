@@ -701,29 +701,9 @@ def main():
         unique_fresh = {}
         
         for s in lang_filtered:
-        
-            sid = str(s["showtime_id"])
-        
-            old = unique_fresh.get(sid)
-        
-            if old is None:
-        
+            sid = str(s.get("showtime_id"))
+            if sid not in unique_fresh:
                 unique_fresh[sid] = s
-        
-                continue
-        
-            # Prefer known language
-            if old["language"] == "Unknown" and s["language"] != "Unknown":
-        
-                unique_fresh[sid] = s
-        
-                continue
-        
-            # Prefer richer metadata
-            if len(json.dumps(s)) > len(json.dumps(old)):
-        
-                unique_fresh[sid] = s
-                
                 
                 
         lang_filtered = list(unique_fresh.values())

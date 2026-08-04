@@ -754,6 +754,28 @@ def main():
             continue
 
         # 6. Fetch seatmap data (modifies shows in-place)
+        
+        existing_ids = set(existing_shows.keys())
+        
+        print()
+        print("=" * 70)
+        print(f"Filtered discovered : {len(filtered)}")
+        
+        already = [
+            s for s in filtered
+            if str(s["showtime_id"]) in existing_ids
+        ]
+        
+        new = [
+            s for s in filtered
+            if str(s["showtime_id"]) not in existing_ids
+        ]
+        
+        print(f"Already in DB      : {len(already)}")
+        print(f"New showtimes      : {len(new)}")
+        print("=" * 70)
+        print()
+        
         asyncio.run(run_seatmap_fetch(filtered))
 
         # 7. Merge: start with existing shows

@@ -19,6 +19,17 @@ ZIP_FILE = "zipcodes.txt"
 MAX_WORKERS = 50
 CONCURRENCY = 45
 
+# --- Custom movies for today (optional) ---
+# Each entry:
+#   movie_id (required)
+#   date (optional) – if omitted, applies to today.
+#   add_extra_langs_shows: "all" | "english" | "unknown" (optional)
+#   extra_langs_for_all_dates: bool (not used in box-office, but kept for consistency)
+CUSTOM_MOVIES = [
+#    {"movie_id": 244612, "add_extra_langs_shows": "all", "extra_langs_for_all_dates": True},
+#    {"movie_id": 244613, "add_extra_langs_shows": "english", "extra_langs_for_all_dates": False, "date": date(2026, 8, 25)},
+]
+
 # Read seatmap URL from environment variable (must be set)
 RENDER_SEATMAP_URL = os.getenv("RENDER_SEATMAP_URL")
 if not RENDER_SEATMAP_URL:
@@ -418,7 +429,7 @@ def save_boxoffice_file(date_obj, shows_dict, error_shows=None):
             s.get("grossRevenueUSD", 0.0),
         ])
 
-    # Summary
+    # Summary (for main file)
     movie_summary = defaultdict(lambda: {
         "shows": 0,
         "tickets": 0,
@@ -475,7 +486,7 @@ def save_boxoffice_file(date_obj, shows_dict, error_shows=None):
     }
     github_put_file(error_path, json.dumps(error_payload, indent=2, ensure_ascii=False), sha)
 
-    # 3. Logs file – read existing, append, write back
+    # 3. Logs file – per‑movie (upgraded)
     logs_path = f"{base_path}/{date_obj.strftime('%d-%m')}_logs.json"
     existing_logs = []
     content, sha = github_get_file(logs_path)
@@ -487,34 +498,62 @@ def save_boxoffice_file(date_obj, shows_dict, error_shows=None):
         except Exception:
             existing_logs = []
 
-    # Compute log entry
-    total_gross = 0.0
-    total_shows = 0
-    total_sold = 0
-    total_capacity = 0
-    venues = set()
-    for s in unique:
-        if "error" in s:
-            continue
-        total_gross += s.get("grossRevenueUSD", 0.0)
-        total_shows += 1
-        total_sold += s.get("totalSeatSold", 0)
-        total_capacity += s.get("totalSeatCount", 0)
-        venues.add(s.get("theater_name"))
+    # Build per‑movie log entries
+    movie_logs = []
+    for (movie_id, movie_title), data in sorted(movie_summary.items(), key=lambda x: x[1]["gross"], reverse=True):
+        occupancy_avg = round(data["occupancy_sum"] / data["shows"], 2) if data["shows"] else 0.0
+        movie_logs.append({
+            "movie_id": movie_id,
+            "movie_title": movie_title,
+            "shows": data["shows"],
+            "tickets_sold": data["tickets"],
+            "total_seats": data["seats"],
+            "gross_usd": round(data["gross"], 2),
+            "avg_occupancy": occupancy_avg,
+        })
 
-    avg_occupancy = round((total_sold / total_capacity) * 100, 2) if total_capacity else 0.0
     log_entry = {
         "time": datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %I:%M:%S %p"),
-        "total_gross_usd": round(total_gross, 2),
-        "total_shows": total_shows,
-        "avg_occupancy": avg_occupancy,
-        "tickets_sold": total_sold,
-        "unique_venues": len(venues),
+        "errors_count": len(error_shows) if error_shows else 0,
+        "movies": movie_logs,
     }
     existing_logs.append(log_entry)
     github_put_file(logs_path, json.dumps(existing_logs, indent=2, ensure_ascii=False), sha)
 
     print(f"💾 Saved/updated all files for {date_obj} in {REPO_OWNER}/{REPO_NAME}")
+
+# ================= HELPER FOR TODAY'S FILTERS =================
+def build_today_filters(today):
+    """
+    Build movie_filter (set of movie_ids or None) and extra_langs_map for today.
+    - If an entry has a 'date' field, only apply if it matches today.
+    - If no 'date' field, apply to today (box-office always runs for today).
+    """
+    movie_filter = None  # None means all movies
+    extra_langs_map = {}
+
+    for custom in CUSTOM_MOVIES:
+        movie_id = custom.get("movie_id")
+        if not movie_id:
+            continue
+
+        entry_date = custom.get("date")
+        # If date is present and not today, skip this entry
+        if entry_date is not None and entry_date != today:
+            continue
+
+        # Add movie to filter (if not already None)
+        if movie_filter is None:
+            movie_filter = {movie_id}
+        else:
+            movie_filter.add(movie_id)
+
+        # Extra language rule
+        extra = custom.get("add_extra_langs_shows")
+        if extra in ("all", "english", "unknown"):
+            extra_langs_map[movie_id] = extra
+
+    return movie_filter, extra_langs_map
 
 # -------- Main ----------
 def main():
@@ -522,6 +561,15 @@ def main():
     today = datetime.now(eastern).date()
     date_str = today.strftime("%Y-%m-%d")
     print(f"📅 Box Office for today: {date_str}")
+
+    # Build filters for today
+    movie_filter, extra_langs_map = build_today_filters(today)
+    if movie_filter is not None:
+        print(f"🎯 Movie filter: {movie_filter}")
+    else:
+        print("🎯 No movie filter – all movies.")
+    if extra_langs_map:
+        print(f"🔤 Extra language rules: {extra_langs_map}")
 
     # 1. Load advance data from remote
     advance_shows = load_advance_file(today)
@@ -552,8 +600,26 @@ def main():
     print("🎬 Scraping fresh showtimes...")
     raw_shows = scrape_all_shows_for_date(zipcodes, date_str)
 
-    # 6. Filter by target languages
-    lang_filtered = [s for s in raw_shows if s.get("language") in TARGET_LANGUAGES]
+    # 6. Filter by language (with extra rules)
+    lang_filtered = []
+    for s in raw_shows:
+        mid = s.get("movie_id")
+        lang = s.get("language")
+        extra = extra_langs_map.get(mid)
+
+        if extra == "all":
+            lang_filtered.append(s)
+        elif extra == "english":
+            if lang in TARGET_LANGUAGES or lang == "English":
+                lang_filtered.append(s)
+        elif extra == "unknown":
+            if lang in TARGET_LANGUAGES or lang == "Unknown":
+                lang_filtered.append(s)
+        else:
+            # Default: only TARGET_LANGUAGES
+            if lang in TARGET_LANGUAGES:
+                lang_filtered.append(s)
+
     print(f"🎟️ Fresh shows (raw): {len(raw_shows)}, after language filter: {len(lang_filtered)}")
 
     # Deduplicate fresh shows by showtime_id
@@ -565,14 +631,21 @@ def main():
     lang_filtered = list(unique_fresh.values())
     print(f"🎟️ Unique fresh shows after dedup: {len(lang_filtered)}")
 
-    if lang_filtered:
+    # 7. Apply movie filter (if any)
+    if movie_filter is not None:
+        filtered = [s for s in lang_filtered if s.get("movie_id") in movie_filter]
+        print(f"🎯 After movie filter: {len(filtered)} fresh shows")
+    else:
+        filtered = lang_filtered
+
+    if filtered:
         print("💺 Fetching seatmaps for fresh shows...")
-        asyncio.run(run_seatmap_fetch(lang_filtered))
-        fresh_shows = lang_filtered
+        asyncio.run(run_seatmap_fetch(filtered))
+        fresh_shows = filtered
     else:
         fresh_shows = []
 
-    # 7. Merge fresh shows
+    # 8. Merge fresh shows
     for fresh in fresh_shows:
         sid = str(fresh.get("showtime_id"))
         if sid in merged_dict:
@@ -584,10 +657,10 @@ def main():
     merged_shows = list(merged_dict.values())
     print(f"🔄 After merging fresh data: {len(merged_shows)} shows.")
 
-    # 8. Separate errors for logging
+    # 9. Separate errors for logging
     error_shows = [s for s in merged_shows if "error" in s]
 
-    # 9. Save to remote boxoffice
+    # 10. Save to remote boxoffice
     save_boxoffice_file(today, merged_shows, error_shows)
 
     print("\n✅ Done.")

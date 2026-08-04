@@ -105,17 +105,50 @@ def get_seatmap_headers():
 
 # -------- Parsers (exact same) ----------
 def extract_language(amenities):
-    lang_priority = []
+
+    # ---------- old parser ----------
+
     for item in amenities:
+
         lowered = item.lower()
+
         for lang in KNOWN_LANGUAGES:
-            if f"{lang.lower()} language" in lowered:
-                return lang
+
             if lang.lower() in lowered:
-                lang_priority.append((lang, lowered.find(lang.lower())))
-    if lang_priority:
-        lang_priority.sort(key=lambda x: x[1])
-        return lang_priority[0][0]
+
+                return lang
+
+    # ---------- fallback parser ----------
+
+    candidates=[]
+
+    for item in amenities:
+
+        lowered=item.lower()
+
+        for lang in KNOWN_LANGUAGES:
+
+            if f"{lang.lower()} language" in lowered:
+
+                return lang
+
+            if lang.lower() in lowered:
+
+                candidates.append(
+                    (
+                        lang,
+                        lowered.find(lang.lower())
+                    )
+                )
+
+    if candidates:
+
+        candidates.sort(
+            key=lambda x:x[1]
+        )
+
+        return candidates[0][0]
+
     return "Unknown"
 
 def extract_format(amenities, default_format):
@@ -269,27 +302,32 @@ async def run_seatmap_fetch(shows):
 
 # -------- Merging logic: keep higher sold, prefer old on error ----------
 def merge_show(old, new):
-    if not old:
+
+    if old is None:
         return new
-    if "error" in new:
+
+    old_error = "error" in old
+    new_error = "error" in new
+
+    # both failed
+    if old_error and new_error:
         return old
-    new_sold = new.get("totalSeatSold", 0)
-    old_sold = old.get("totalSeatSold", 0)
-    if new_sold > old_sold:
-        chosen = new.copy()
-        chosen_sold = new_sold
-    else:
-        chosen = old.copy()
-        chosen_sold = old_sold
-    total = chosen.get("totalSeatCount", 0)
-    if total and total > 0:
-        chosen["occupancy"] = round((chosen_sold / total) * 100, 2)
-    else:
-        chosen["occupancy"] = 0.0
-    price = chosen.get("adultTicketPrice", 0.0)
-    chosen["grossRevenueUSD"] = round(price * chosen_sold, 2)
-    chosen["totalSeatSold"] = chosen_sold
-    return chosen
+
+    # old failed, new succeeded
+    if old_error and not new_error:
+        return new
+
+    # old succeeded, new failed
+    if not old_error and new_error:
+        return old
+
+    # both succeeded
+
+    if new.get("totalSeatSold",0) >= old.get("totalSeatSold",0):
+
+        return new
+
+    return old
 
 # -------- GitHub API helpers for reading/writing remote files ----------
 def github_get_file(path):
@@ -624,11 +662,42 @@ def main():
 
     # Deduplicate fresh shows by showtime_id
     unique_fresh = {}
+    
     for s in lang_filtered:
-        sid = str(s.get("showtime_id"))
-        if sid not in unique_fresh:
+    
+        sid = str(s["showtime_id"])
+    
+        old = unique_fresh.get(sid)
+    
+        if old is None:
+    
+            unique_fresh[sid] = s
+    
+            continue
+    
+        if old["language"] == "Unknown" and s["language"] != "Unknown":
+    
+            unique_fresh[sid] = s
+    
+            continue
+    
+        if len(json.dumps(s)) > len(json.dumps(old)):
+    
             unique_fresh[sid] = s
     lang_filtered = list(unique_fresh.values())
+    
+    from collections import Counter
+    
+    print()
+    
+    print("Language Counts")
+    
+    print(Counter(x["language"] for x in raw_shows))
+    
+    print(Counter(x["language"] for x in lang_filtered))
+    
+    print()
+    
     print(f"🎟️ Unique fresh shows after dedup: {len(lang_filtered)}")
 
     # 7. Apply movie filter (if any)
@@ -646,13 +715,34 @@ def main():
         fresh_shows = []
 
     # 8. Merge fresh shows
+    # --------------------------------------------------
+    # STEP 1
+    # Insert every discovered show first.
+    # --------------------------------------------------
+    
     for fresh in fresh_shows:
-        sid = str(fresh.get("showtime_id"))
-        if sid in merged_dict:
-            merged_dict[sid] = merge_show(merged_dict[sid], fresh)
-        else:
-            if "error" not in fresh:
-                merged_dict[sid] = fresh
+    
+        sid = str(fresh["showtime_id"])
+    
+        if sid not in merged_dict:
+    
+            merged_dict[sid] = fresh
+    
+    # --------------------------------------------------
+    # STEP 2
+    # Merge seatmap results.
+    # --------------------------------------------------
+    
+    for fresh in fresh_shows:
+    
+        sid = str(fresh["showtime_id"])
+    
+        merged_dict[sid] = merge_show(
+    
+            merged_dict[sid],
+    
+            fresh
+        )
 
     merged_shows = list(merged_dict.values())
     print(f"🔄 After merging fresh data: {len(merged_shows)} shows.")

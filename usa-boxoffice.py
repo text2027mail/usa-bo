@@ -661,29 +661,14 @@ def main():
     print(f"🎟️ Fresh shows (raw): {len(raw_shows)}, after language filter: {len(lang_filtered)}")
 
     # Deduplicate fresh shows by showtime_id
+    # 4. Deduplicate fresh shows by showtime_id (OLD LOGIC)
     unique_fresh = {}
     
     for s in lang_filtered:
-    
-        sid = str(s["showtime_id"])
-    
-        old = unique_fresh.get(sid)
-    
-        if old is None:
-    
+        sid = str(s.get("showtime_id"))
+        if sid not in unique_fresh:
             unique_fresh[sid] = s
     
-            continue
-    
-        if old["language"] == "Unknown" and s["language"] != "Unknown":
-    
-            unique_fresh[sid] = s
-    
-            continue
-    
-        if len(json.dumps(s)) > len(json.dumps(old)):
-    
-            unique_fresh[sid] = s
     lang_filtered = list(unique_fresh.values())
     
     from collections import Counter

@@ -48,8 +48,8 @@ REPO_OWNER = "text2027mail"          # <-- CHANGE to your GitHub username
 REPO_NAME = "usadata2026"             # <-- CHANGE if repo name differs
 
 KNOWN_LANGUAGES = [
-    "English", "Hindi", "Tamil", "Telugu", "Kannada",
-    "Malayalam", "Punjabi", "Gujarati", "Marathi", "Bengali"
+    "Hindi", "Tamil", "Telugu", "Kannada",
+    "Malayalam", "Punjabi", "Gujarati", "Marathi", "Bengali", "English"
 ]
 FORMAT_KEYWORDS = [
     "RPX", "D-Box", "IMAX", "EMX", "Sony Digital Cinema",

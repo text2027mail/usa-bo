@@ -105,50 +105,17 @@ def get_seatmap_headers():
 
 # -------- Parsers (exact same) ----------
 def extract_language(amenities):
-
-    # ---------- old parser ----------
-
+    lang_priority = []
     for item in amenities:
-
         lowered = item.lower()
-
         for lang in KNOWN_LANGUAGES:
-
-            if lang.lower() in lowered:
-
-                return lang
-
-    # ---------- fallback parser ----------
-
-    candidates=[]
-
-    for item in amenities:
-
-        lowered=item.lower()
-
-        for lang in KNOWN_LANGUAGES:
-
             if f"{lang.lower()} language" in lowered:
-
                 return lang
-
             if lang.lower() in lowered:
-
-                candidates.append(
-                    (
-                        lang,
-                        lowered.find(lang.lower())
-                    )
-                )
-
-    if candidates:
-
-        candidates.sort(
-            key=lambda x:x[1]
-        )
-
-        return candidates[0][0]
-
+                lang_priority.append((lang, lowered.find(lang.lower())))
+    if lang_priority:
+        lang_priority.sort(key=lambda x: x[1])
+        return lang_priority[0][0]
     return "Unknown"
 
 def extract_format(amenities, default_format):

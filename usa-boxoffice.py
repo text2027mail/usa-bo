@@ -126,26 +126,43 @@ def extract_format(amenities, default_format):
 
 def prepare_showtimes(movie):
     out = []
+
     movie_title = movie.get("title", "Unknown")
     movie_id = movie.get("id")
+
     for variant in movie.get("variants", []):
-        fmt = variant.get("formatName", "Standard")
+
+        # Fandango's official format field
+        fmt = (
+            variant.get("filmFormatHeader")
+            or variant.get("formatName")
+            or "Standard"
+        )
+
         for ag in variant.get("amenityGroups", []):
-            amenities = [a.get("name", "") for a in ag.get("amenities", [])]
+
+            amenities = [
+                a.get("name", "")
+                for a in ag.get("amenities", [])
+            ]
+
             lang = extract_language(amenities)
-            fmt_final = extract_format(amenities, fmt)
+
             for show in ag.get("showtimes", []):
+
                 sid = show.get("id")
                 if not sid:
                     continue
+
                 out.append({
                     "showtime_id": sid,
                     "date": show.get("ticketingDate"),
-                    "format": fmt_final,
+                    "format": fmt,
                     "language": lang,
                     "movie_title": movie_title,
                     "movie_id": movie_id,
                 })
+
     return out
 
 # -------- Theater scraping (multiprocessing) ----------

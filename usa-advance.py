@@ -74,6 +74,25 @@ FORMAT_KEYWORDS = [
     "4DX", "ScreenX", "Cinemark XD", "Dolby Cinema"
 ]
 
+# ============================================================
+# MOVIE TITLE MERGE / ALIAS CONFIGURATION
+# ============================================================
+
+# MASTER MOVIE ID : [ALL RELATED MOVIE IDS]
+#
+# IMPORTANT:
+# - IDs are NEVER changed in the saved data.
+# - The first/key ID is the ORIGINAL / MASTER movie.
+# - All IDs inside the list retain their own movie_id.
+# - Alternate IDs inherit the MASTER movie title.
+
+MERGE_MOVIE_IDS = {
+    244612: [244612, 246785],
+    # 250001: [250001, 250002, 250003],
+}
+
+DEBUG_MOVIE_TITLE_MERGE = True   # set True for verbose alias logging
+
 # ================= SPOOFING HELPERS =================
 
 USER_AGENTS = [
@@ -368,6 +387,80 @@ def github_put_file(path, content, sha=None):
     else:
         raise Exception(f"GitHub PUT error {resp.status_code}: {resp.text}")
 
+# ============================================================
+# MOVIE TITLE ALIAS / MERGE HELPERS
+# ============================================================
+
+def build_title_master_map(merge_config):
+    """
+    Validates and builds master_map and master_set from MERGE_MOVIE_IDS.
+    Returns (master_map, master_set) where master_map: movie_id -> master_id,
+    and master_set: set of master IDs.
+    """
+    master_map = {}
+    master_set = set()
+    alias_to_master = {}
+
+    for master, aliases in merge_config.items():
+        # Ensure master is in aliases list; deduplicate
+        aliases = list(set(aliases))
+        if master not in aliases:
+            aliases.append(master)
+        # Validate each alias not already assigned to another master
+        for alias in aliases:
+            if alias in alias_to_master and alias_to_master[alias] != master:
+                raise ValueError(f"Alias {alias} is already assigned to master {alias_to_master[alias]}, cannot also assign to {master}")
+            alias_to_master[alias] = master
+            master_map[alias] = master
+        master_set.add(master)
+
+    # For any movie not in map, it maps to itself (implicitly)
+    return master_map, master_set
+
+# Build global maps
+MOVIE_TITLE_MASTER_MAP, MASTER_IDS_SET = build_title_master_map(MERGE_MOVIE_IDS)
+MASTER_MOVIE_TITLES = {}
+
+def get_master_id(movie_id):
+    """Return the master ID for the given movie_id."""
+    return MOVIE_TITLE_MASTER_MAP.get(movie_id, movie_id)
+
+def update_master_title(movie_id, title):
+    """Update master title if movie_id is a master ID."""
+    if movie_id in MASTER_IDS_SET and title:
+        if DEBUG_MOVIE_TITLE_MERGE:
+            old = MASTER_MOVIE_TITLES.get(movie_id)
+            if old and old != title:
+                print(f"🔁 Updating master title for {movie_id}: '{old}' -> '{title}'")
+        MASTER_MOVIE_TITLES[movie_id] = title
+
+def get_canonical_movie_title(movie_id, current_title=None):
+    """
+    Return the canonical title for the given movie_id.
+    If master title is known, use it; otherwise return current_title.
+    """
+    master_id = MOVIE_TITLE_MASTER_MAP.get(movie_id, movie_id)
+    if master_id in MASTER_MOVIE_TITLES:
+        return MASTER_MOVIE_TITLES[master_id]
+    return current_title if current_title is not None else ""
+
+def normalize_show_title(show):
+    """In-place normalization of movie_title."""
+    movie_id = show.get("movie_id")
+    if movie_id is not None:
+        canonical = get_canonical_movie_title(movie_id, show.get("movie_title"))
+        show["movie_title"] = canonical
+
+def expand_movie_ids(movie_ids_set):
+    """Expand a set of movie IDs to include all aliases of their master groups."""
+    expanded = set()
+    for mid in movie_ids_set:
+        master = get_master_id(mid)
+        for alias, m in MOVIE_TITLE_MASTER_MAP.items():
+            if m == master:
+                expanded.add(alias)
+    return expanded
+
 # ================= LOAD / SAVE ADVANCE HELPERS (remote) =================
 
 def load_existing_advance_file(date_obj):
@@ -404,6 +497,8 @@ def load_existing_advance_file(date_obj):
                             "adultTicketPrice": arr[13],
                             "grossRevenueUSD": arr[14],
                         }
+                        # Register master title from existing data
+                        update_master_title(d["movie_id"], d["movie_title"])
                         shows[str(arr[0])] = d
         except Exception as e:
             print(f"⚠️ Could not parse remote advance file {path}: {e}")
@@ -571,7 +666,7 @@ def build_date_filter_map():
         movie_filter.setdefault(d, None)
 
     # ------------------------------------------------
-    # FIRST add every custom movie date
+    # FIRST add every custom movie date (expanded to all aliases)
     # ------------------------------------------------
 
     for custom in CUSTOM_MOVIES:
@@ -582,16 +677,18 @@ def build_date_filter_map():
         if not d or not mid:
             continue
 
+        expanded = expand_movie_ids({mid})
+
         if d not in movie_filter:
 
-            movie_filter[d] = {mid}
+            movie_filter[d] = expanded
 
         elif movie_filter[d] is not None:
 
-            movie_filter[d].add(mid)
+            movie_filter[d].update(expanded)
 
     # ------------------------------------------------
-    # NOW create extra_langs_map
+    # NOW create extra_langs_map, expanded to all aliases
     # ------------------------------------------------
 
     extra_langs_map = {}
@@ -601,23 +698,26 @@ def build_date_filter_map():
     for custom in CUSTOM_MOVIES:
 
         movie_id = custom.get("movie_id")
-
         extra = custom.get("add_extra_langs_shows")
 
         if extra not in ("all","english","unknown"):
             continue
 
-        if custom.get("extra_langs_for_all_dates",False):
+        # Get master for this movie
+        master_id = get_master_id(movie_id)
+        # All aliases under this master
+        aliases = [aid for aid, m in MOVIE_TITLE_MASTER_MAP.items() if m == master_id]
 
-            for d in all_dates:
-
-                extra_langs_map[(d,movie_id)] = extra
-
+        if custom.get("extra_langs_for_all_dates", False):
+            dates_to_apply = all_dates
         else:
+            dates_to_apply = [custom["date"]]
 
-            extra_langs_map[(custom["date"],movie_id)] = extra
+        for d in dates_to_apply:
+            for alias in aliases:
+                extra_langs_map[(d, alias)] = extra
 
-    return movie_filter,extra_langs_map
+    return movie_filter, extra_langs_map
 
 # ================= MAIN =================
 
@@ -656,7 +756,7 @@ def main():
         # 2. Scrape fresh showtimes
         raw_shows = scrape_all_shows_for_date(zipcodes, date_str)
 
-        # 3. Filter by language (respect extra_langs_map)
+        # 3. Filter by language (respect extra_langs_map, now expanded)
         lang_filtered = []
         for s in raw_shows:
             mid = s.get("movie_id")
@@ -683,24 +783,17 @@ def main():
 
         # 4. Deduplicate fresh shows by showtime_id
         unique_fresh = {}
-        
         for s in lang_filtered:
             sid = str(s.get("showtime_id"))
             if sid not in unique_fresh:
                 unique_fresh[sid] = s
-                
-                
         lang_filtered = list(unique_fresh.values())
+
         from collections import Counter
-        
         print()
-        
         print("Language Counts")
-        
         print(Counter(x["language"] for x in raw_shows))
-        
         print(Counter(x["language"] for x in lang_filtered))
-        
         print()
         print(f"  After dedup: {len(lang_filtered)}")
 
@@ -717,77 +810,53 @@ def main():
             # We keep existing data (do not overwrite)
             continue
 
-        # 6. Fetch seatmap data (modifies shows in-place)
-        
+        # 6. Register master titles from fresh shows (for master IDs)
+        for s in filtered:
+            update_master_title(s.get("movie_id"), s.get("movie_title"))
+
+        # 7. Fetch seatmap data (modifies shows in-place)
         existing_ids = set(existing_shows.keys())
-        
         print()
         print("=" * 70)
         print(f"Filtered discovered : {len(filtered)}")
-        
-        already = [
-            s for s in filtered
-            if str(s["showtime_id"]) in existing_ids
-        ]
-        
-        new = [
-            s for s in filtered
-            if str(s["showtime_id"]) not in existing_ids
-        ]
-        
+        already = [s for s in filtered if str(s["showtime_id"]) in existing_ids]
+        new = [s for s in filtered if str(s["showtime_id"]) not in existing_ids]
         print(f"Already in DB      : {len(already)}")
         print(f"New showtimes      : {len(new)}")
         print("=" * 70)
         print()
-        
+
         asyncio.run(run_seatmap_fetch(filtered))
 
-        # 7. Merge: start with existing shows
-        # 7. Merge: start with existing shows
+        # 8. Merge: start with existing shows
         merged_dict = existing_shows.copy()
-         
-        # ------------------------------------------------------------------
-        # STEP 1
-        # Insert EVERY discovered show first.
-        # This matches the behaviour of the old scraper.
-        # ------------------------------------------------------------------
-        
+
+        # STEP 1: Insert EVERY discovered show first.
         for fresh in filtered:
-        
             sid = str(fresh["showtime_id"])
-         
             if sid not in merged_dict:
-         
                 merged_dict[sid] = fresh
-         
-        # ------------------------------------------------------------------
-        # STEP 2
-        # Merge seatmap results.
-        # Successful seatmaps replace older data.
-        # Failed seatmaps never overwrite good data.
-        # ------------------------------------------------------------------
-         
+
+        # STEP 2: Merge seatmap results.
         for fresh in filtered:
-         
             sid = str(fresh["showtime_id"])
-        
-            merged_dict[sid] = merge_show(
-                merged_dict[sid],
-                fresh
-            )
-         
-        # ------------------------------------------------------------------
-        # Build error list
-        # ------------------------------------------------------------------
-         
-        error_shows = [
-            s
-            for s in merged_dict.values()
-            if "error" in s
-        ]
+            merged_dict[sid] = merge_show(merged_dict[sid], fresh)
+
+        # 9. Final title normalization: apply canonical titles to all shows
+        for sid, show in merged_dict.items():
+            normalize_show_title(show)
+
+        # 10. Build error list (and normalize their titles)
+        error_shows = []
+        for s in merged_dict.values():
+            if "error" in s:
+                # normalize the error show's title as well
+                normalize_show_title(s)
+                error_shows.append(s)
+
         print(f"  Successful shows: {len(merged_dict) - len(error_shows)}, Errors: {len(error_shows)}")
 
-        # 8. Write merged data to remote
+        # 11. Write merged data to remote
         write_advance_file(scrape_date, merged_dict, error_shows)
 
     print("\n✅ All dates processed.")

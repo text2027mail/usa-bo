@@ -56,6 +56,27 @@ FORMAT_KEYWORDS = [
     "4DX", "ScreenX", "Cinemark XD", "Dolby Cinema"
 ]
 
+# ============================================================
+# MOVIE TITLE MERGE / ALIAS CONFIGURATION
+# ============================================================
+
+# MASTER MOVIE ID : [ALL RELATED MOVIE IDS]
+#
+# IMPORTANT:
+# - IDs are NEVER changed in the saved data.
+# - The first/key ID is the ORIGINAL / MASTER movie.
+# - All IDs inside the list retain their own movie_id.
+# - Alternate IDs inherit the MASTER movie title.
+
+MERGE_MOVIE_IDS = {
+    244612: [244612, 246785],
+    # 250001: [250001, 250002, 250003],
+}
+
+DEBUG_MOVIE_TITLE_MERGE = False   # set True for verbose alias logging
+
+# ================= SPOOFING HELPERS =================
+
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{version} Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:{version}) Gecko/20100101 Firefox/{version}",
@@ -343,6 +364,80 @@ def github_put_file(path, content, sha=None):
     else:
         raise Exception(f"GitHub PUT error {resp.status_code}: {resp.text}")
 
+# ============================================================
+# MOVIE TITLE ALIAS / MERGE HELPERS
+# ============================================================
+
+def build_title_master_map(merge_config):
+    """
+    Validates and builds master_map and master_set from MERGE_MOVIE_IDS.
+    Returns (master_map, master_set) where master_map: movie_id -> master_id,
+    and master_set: set of master IDs.
+    """
+    master_map = {}
+    master_set = set()
+    alias_to_master = {}
+
+    for master, aliases in merge_config.items():
+        # Ensure master is in aliases list; deduplicate
+        aliases = list(set(aliases))
+        if master not in aliases:
+            aliases.append(master)
+        # Validate each alias not already assigned to another master
+        for alias in aliases:
+            if alias in alias_to_master and alias_to_master[alias] != master:
+                raise ValueError(f"Alias {alias} is already assigned to master {alias_to_master[alias]}, cannot also assign to {master}")
+            alias_to_master[alias] = master
+            master_map[alias] = master
+        master_set.add(master)
+
+    # For any movie not in map, it maps to itself (implicitly)
+    return master_map, master_set
+
+# Build global maps
+MOVIE_TITLE_MASTER_MAP, MASTER_IDS_SET = build_title_master_map(MERGE_MOVIE_IDS)
+MASTER_MOVIE_TITLES = {}
+
+def get_master_id(movie_id):
+    """Return the master ID for the given movie_id."""
+    return MOVIE_TITLE_MASTER_MAP.get(movie_id, movie_id)
+
+def update_master_title(movie_id, title):
+    """Update master title if movie_id is a master ID."""
+    if movie_id in MASTER_IDS_SET and title:
+        if DEBUG_MOVIE_TITLE_MERGE:
+            old = MASTER_MOVIE_TITLES.get(movie_id)
+            if old and old != title:
+                print(f"🔁 Updating master title for {movie_id}: '{old}' -> '{title}'")
+        MASTER_MOVIE_TITLES[movie_id] = title
+
+def get_canonical_movie_title(movie_id, current_title=None):
+    """
+    Return the canonical title for the given movie_id.
+    If master title is known, use it; otherwise return current_title.
+    """
+    master_id = MOVIE_TITLE_MASTER_MAP.get(movie_id, movie_id)
+    if master_id in MASTER_MOVIE_TITLES:
+        return MASTER_MOVIE_TITLES[master_id]
+    return current_title if current_title is not None else ""
+
+def normalize_show_title(show):
+    """In-place normalization of movie_title."""
+    movie_id = show.get("movie_id")
+    if movie_id is not None:
+        canonical = get_canonical_movie_title(movie_id, show.get("movie_title"))
+        show["movie_title"] = canonical
+
+def expand_movie_ids(movie_ids_set):
+    """Expand a set of movie IDs to include all aliases of their master groups."""
+    expanded = set()
+    for mid in movie_ids_set:
+        master = get_master_id(mid)
+        for alias, m in MOVIE_TITLE_MASTER_MAP.items():
+            if m == master:
+                expanded.add(alias)
+    return expanded
+
 # -------- Load / save helpers using GitHub API ----------
 def load_advance_file(date_obj):
     year = date_obj.strftime("%Y")
@@ -374,6 +469,8 @@ def load_advance_file(date_obj):
                         "adultTicketPrice": arr[13],
                         "grossRevenueUSD": arr[14],
                     }
+                    # Register master title from existing data
+                    update_master_title(d["movie_id"], d["movie_title"])
                     show_dicts.append(d)
             return show_dicts
     except Exception as e:
@@ -410,6 +507,7 @@ def load_boxoffice_file(date_obj):
                         "adultTicketPrice": arr[13],
                         "grossRevenueUSD": arr[14],
                     }
+                    update_master_title(d["movie_id"], d["movie_title"])
                     show_dicts.append(d)
             return show_dicts
     except Exception as e:
@@ -550,6 +648,7 @@ def build_today_filters(today):
     Build movie_filter (set of movie_ids or None) and extra_langs_map for today.
     - If an entry has a 'date' field, only apply if it matches today.
     - If no 'date' field, apply to today (box-office always runs for today).
+    - Expanded to include all aliases for each movie_id in the filter.
     """
     movie_filter = None  # None means all movies
     extra_langs_map = {}
@@ -564,16 +663,21 @@ def build_today_filters(today):
         if entry_date is not None and entry_date != today:
             continue
 
-        # Add movie to filter (if not already None)
-        if movie_filter is None:
-            movie_filter = {movie_id}
-        else:
-            movie_filter.add(movie_id)
+        # Get master and all aliases
+        master = get_master_id(movie_id)
+        aliases = [aid for aid, m in MOVIE_TITLE_MASTER_MAP.items() if m == master]
 
-        # Extra language rule
+        # Add all aliases to the filter set
+        if movie_filter is None:
+            movie_filter = set(aliases)
+        else:
+            movie_filter.update(aliases)
+
+        # Extra language rule: apply to all aliases
         extra = custom.get("add_extra_langs_shows")
         if extra in ("all", "english", "unknown"):
-            extra_langs_map[movie_id] = extra
+            for alias in aliases:
+                extra_langs_map[alias] = extra
 
     return movie_filter, extra_langs_map
 
@@ -584,14 +688,14 @@ def main():
     date_str = today.strftime("%Y-%m-%d")
     print(f"📅 Box Office for today: {date_str}")
 
-    # Build filters for today
+    # Build filters for today (expanded)
     movie_filter, extra_langs_map = build_today_filters(today)
     if movie_filter is not None:
-        print(f"🎯 Movie filter: {movie_filter}")
+        print(f"🎯 Movie filter (expanded): {movie_filter}")
     else:
         print("🎯 No movie filter – all movies.")
     if extra_langs_map:
-        print(f"🔤 Extra language rules: {extra_langs_map}")
+        print(f"🔤 Extra language rules (expanded): {extra_langs_map}")
 
     # 1. Load advance data from remote
     advance_shows = load_advance_file(today)
@@ -622,7 +726,7 @@ def main():
     print("🎬 Scraping fresh showtimes...")
     raw_shows = scrape_all_shows_for_date(zipcodes, date_str)
 
-    # 6. Filter by language (with extra rules)
+    # 6. Filter by language (with extra rules, now expanded)
     lang_filtered = []
     for s in raw_shows:
         mid = s.get("movie_id")
@@ -645,36 +749,31 @@ def main():
     print(f"🎟️ Fresh shows (raw): {len(raw_shows)}, after language filter: {len(lang_filtered)}")
 
     # Deduplicate fresh shows by showtime_id
-    # 4. Deduplicate fresh shows by showtime_id (OLD LOGIC)
     unique_fresh = {}
-    
     for s in lang_filtered:
         sid = str(s.get("showtime_id"))
         if sid not in unique_fresh:
             unique_fresh[sid] = s
-    
     lang_filtered = list(unique_fresh.values())
-    
+
     from collections import Counter
-    
     print()
-    
     print("Language Counts")
-    
     print(Counter(x["language"] for x in raw_shows))
-    
     print(Counter(x["language"] for x in lang_filtered))
-    
     print()
-    
     print(f"🎟️ Unique fresh shows after dedup: {len(lang_filtered)}")
 
-    # 7. Apply movie filter (if any)
+    # 7. Apply movie filter (if any) – already expanded
     if movie_filter is not None:
         filtered = [s for s in lang_filtered if s.get("movie_id") in movie_filter]
         print(f"🎯 After movie filter: {len(filtered)} fresh shows")
     else:
         filtered = lang_filtered
+
+    # 8. Register master titles from fresh shows (for master IDs)
+    for s in filtered:
+        update_master_title(s.get("movie_id"), s.get("movie_title"))
 
     if filtered:
         print("💺 Fetching seatmaps for fresh shows...")
@@ -683,43 +782,33 @@ def main():
     else:
         fresh_shows = []
 
-    # 8. Merge fresh shows
-    # --------------------------------------------------
-    # STEP 1
-    # Insert every discovered show first.
-    # --------------------------------------------------
-    
+    # 9. Merge fresh shows
+    # STEP 1: Insert every discovered show first.
     for fresh in fresh_shows:
-    
         sid = str(fresh["showtime_id"])
-    
         if sid not in merged_dict:
-    
             merged_dict[sid] = fresh
-    
-    # --------------------------------------------------
-    # STEP 2
-    # Merge seatmap results.
-    # --------------------------------------------------
-    
+
+    # STEP 2: Merge seatmap results.
     for fresh in fresh_shows:
-    
         sid = str(fresh["showtime_id"])
-    
-        merged_dict[sid] = merge_show(
-    
-            merged_dict[sid],
-    
-            fresh
-        )
+        merged_dict[sid] = merge_show(merged_dict[sid], fresh)
+
+    # 10. Final title normalization: apply canonical titles to all shows
+    for sid, show in merged_dict.items():
+        normalize_show_title(show)
 
     merged_shows = list(merged_dict.values())
     print(f"🔄 After merging fresh data: {len(merged_shows)} shows.")
 
-    # 9. Separate errors for logging
-    error_shows = [s for s in merged_shows if "error" in s]
+    # 11. Separate errors for logging and normalize their titles
+    error_shows = []
+    for s in merged_shows:
+        if "error" in s:
+            normalize_show_title(s)
+            error_shows.append(s)
 
-    # 10. Save to remote boxoffice
+    # 12. Save to remote boxoffice
     save_boxoffice_file(today, merged_shows, error_shows)
 
     print("\n✅ Done.")

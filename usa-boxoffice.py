@@ -60,17 +60,20 @@ FORMAT_KEYWORDS = [
 # MOVIE TITLE MERGE / ALIAS CONFIGURATION
 # ============================================================
 
-# MASTER MOVIE ID : [ALL RELATED MOVIE IDS]
-#
-# IMPORTANT:
-# - IDs are NEVER changed in the saved data.
-# - The first/key ID is the ORIGINAL / MASTER movie.
-# - All IDs inside the list retain their own movie_id.
-# - Alternate IDs inherit the MASTER movie title.
+# NEW: You can now specify a custom title for each master movie.
+# Format:
+#   master_id: {
+#       "ids": [list_of_aliases],
+#       "title": "Your Custom Title"   # optional
+#   }
+# Or keep the old format: master_id: [list_of_aliases] (no custom title)
 
 MERGE_MOVIE_IDS = {
-    244612: [244612, 246785],
-    # 250001: [250001, 250002, 250003],
+    244612: {
+        "ids": [244612, 246785],
+        "title": "Toxic (2026)"   # <-- Custom title
+    },
+    # 250001: [250001, 250002, 250003],   # old format still works
 }
 
 DEBUG_MOVIE_TITLE_MERGE = False   # set True for verbose alias logging
@@ -365,46 +368,70 @@ def github_put_file(path, content, sha=None):
         raise Exception(f"GitHub PUT error {resp.status_code}: {resp.text}")
 
 # ============================================================
-# MOVIE TITLE ALIAS / MERGE HELPERS
+# MOVIE TITLE ALIAS / MERGE HELPERS (UPDATED)
 # ============================================================
+
+MASTER_MOVIE_TITLES = {}
+MASTER_CUSTOM_TITLES = {}   # <-- NEW: store custom titles from config
 
 def build_title_master_map(merge_config):
     """
     Validates and builds master_map and master_set from MERGE_MOVIE_IDS.
-    Returns (master_map, master_set) where master_map: movie_id -> master_id,
-    and master_set: set of master IDs.
+    Also fills MASTER_CUSTOM_TITLES with any custom titles.
+    Returns (master_map, master_set).
     """
     master_map = {}
     master_set = set()
     alias_to_master = {}
 
-    for master, aliases in merge_config.items():
-        # Ensure master is in aliases list; deduplicate
-        aliases = list(set(aliases))
+    for master, value in merge_config.items():
+        # Parse the value – can be list or dict
+        if isinstance(value, list):
+            aliases = list(set(value))
+            custom_title = None
+        elif isinstance(value, dict):
+            aliases = list(set(value.get("ids", [])))
+            custom_title = value.get("title")
+        else:
+            raise ValueError(f"Invalid value for master {master}: {value}")
+
+        # Ensure master is in the alias list
         if master not in aliases:
             aliases.append(master)
-        # Validate each alias not already assigned to another master
+
+        # Validate aliases
         for alias in aliases:
             if alias in alias_to_master and alias_to_master[alias] != master:
-                raise ValueError(f"Alias {alias} is already assigned to master {alias_to_master[alias]}, cannot also assign to {master}")
+                raise ValueError(
+                    f"Alias {alias} already assigned to master {alias_to_master[alias]}, cannot also assign to {master}"
+                )
             alias_to_master[alias] = master
             master_map[alias] = master
+
         master_set.add(master)
 
-    # For any movie not in map, it maps to itself (implicitly)
+        # Store custom title if provided
+        if custom_title:
+            MASTER_CUSTOM_TITLES[master] = custom_title
+
     return master_map, master_set
 
 # Build global maps
 MOVIE_TITLE_MASTER_MAP, MASTER_IDS_SET = build_title_master_map(MERGE_MOVIE_IDS)
-MASTER_MOVIE_TITLES = {}
 
 def get_master_id(movie_id):
     """Return the master ID for the given movie_id."""
     return MOVIE_TITLE_MASTER_MAP.get(movie_id, movie_id)
 
 def update_master_title(movie_id, title):
-    """Update master title if movie_id is a master ID."""
+    """Update master title if movie_id is a master ID, but never override a custom title."""
     if movie_id in MASTER_IDS_SET and title:
+        # If a custom title exists for this master, keep it
+        if movie_id in MASTER_CUSTOM_TITLES:
+            if DEBUG_MOVIE_TITLE_MERGE:
+                print(f"🔒 Keeping custom title for {movie_id}: '{MASTER_CUSTOM_TITLES[movie_id]}'")
+            return
+        # Otherwise update normally
         if DEBUG_MOVIE_TITLE_MERGE:
             old = MASTER_MOVIE_TITLES.get(movie_id)
             if old and old != title:
@@ -683,6 +710,12 @@ def build_today_filters(today):
 
 # -------- Main ----------
 def main():
+    # Apply custom titles upfront (NEW)
+    for master, title in MASTER_CUSTOM_TITLES.items():
+        MASTER_MOVIE_TITLES[master] = title
+        if DEBUG_MOVIE_TITLE_MERGE:
+            print(f"📌 Custom title set for master {master}: '{title}'")
+
     eastern = ZoneInfo("America/New_York")
     today = datetime.now(eastern).date()
     date_str = today.strftime("%Y-%m-%d")

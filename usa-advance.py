@@ -22,16 +22,13 @@ FETCH_TOMORROW = True
 
 # --- Dates for which we want ALL movies (target languages) ---
 SCRAPE_DATES = [
-     date(2026, 8, 25),
-     date(2026, 8, 26),
+     date(2026, 9, 1),
 ]
 
 # --- Custom movies with extra language options ---
 CUSTOM_MOVIES = [
 #   {"movie_id": 244612, "date": date(2026, 8, 25)},
 #   {"movie_id": 244612, "date": date(2026, 8, 26), "add_extra_langs_shows": "english"},
-    {"movie_id": 244612, "date": date(2026, 8, 25), "add_extra_langs_shows": "all", "extra_langs_for_all_dates": True},
-    {"movie_id": 244612, "date": date(2026, 8, 26), "add_extra_langs_shows": "all", "extra_langs_for_all_dates": True},
 ]
 
 # --- File containing US zip codes (one per line) ---

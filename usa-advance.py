@@ -746,9 +746,31 @@ def main():
         if DEBUG_MOVIE_TITLE_MERGE:
             print(f"📌 Custom title set for master {master}: '{title}'")
 
+    # --- NEW: Get today's date (Eastern Time) ---
+    eastern = ZoneInfo("America/New_York")
+    today = datetime.now(eastern).date()
+    print(f"📅 Today's date (Eastern): {today}")
+
     movie_filter, extra_langs_map = build_date_filter_map()
+
+    # --- NEW: Filter out dates that are not in the future (<= today) ---
+    future_filter = {}
+    for d, filt in movie_filter.items():
+        if d > today:
+            future_filter[d] = filt
+        else:
+            print(f"⏭️  Skipping date {d} – it is not in the future (today is {today})")
+    movie_filter = future_filter
+
+    # Also filter extra_langs_map to only future dates
+    extra_langs_map = {
+        (d, mid): rule
+        for (d, mid), rule in extra_langs_map.items()
+        if d in movie_filter
+    }
+
     if not movie_filter:
-        print("No dates to scrape. Enable FETCH_TOMORROW, set SCRAPE_DATES, or add CUSTOM_MOVIES.")
+        print("No future dates to scrape. Exiting.")
         return
 
     print("📅 Scraping plan:")

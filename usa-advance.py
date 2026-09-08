@@ -23,6 +23,7 @@ FETCH_TOMORROW = True
 # --- Dates for which we want ALL movies (target languages) ---
 SCRAPE_DATES = [
      date(2026, 9, 23),
+     date(2026, 9, 11),
 ]
 
 # --- Custom movies with extra language options ---

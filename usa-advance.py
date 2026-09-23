@@ -26,6 +26,12 @@ SCRAPE_DATES = [
      date(2026, 9, 11),
 ]
 
+# --- Force-run dates ---
+# These dates are scraped even if they are today or already in the past.
+FORCE_SCRAPE_DATES = [
+    date(2026, 9, 23),
+]
+
 # --- Custom movies with extra language options ---
 CUSTOM_MOVIES = [
 #   {"movie_id": 244612, "date": date(2026, 8, 25)},
@@ -754,13 +760,19 @@ def main():
 
     movie_filter, extra_langs_map = build_date_filter_map()
 
-    # --- NEW: Filter out dates that are not in the future (<= today) ---
+    # --- Filter out dates that are not in the future unless force-run is enabled ---
     future_filter = {}
+    force_dates = set(FORCE_SCRAPE_DATES)
+
     for d, filt in movie_filter.items():
         if d > today:
             future_filter[d] = filt
+        elif d in force_dates:
+            future_filter[d] = filt
+            print(f"🚀 FORCE RUN enabled for {d} – scraping despite today being {today}")
         else:
             print(f"⏭️  Skipping date {d} – it is not in the future (today is {today})")
+
     movie_filter = future_filter
 
     # Also filter extra_langs_map to only future dates

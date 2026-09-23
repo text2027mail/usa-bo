@@ -29,7 +29,7 @@ SCRAPE_DATES = [
 # --- Force-run dates ---
 # These dates are scraped even if they are today or already in the past.
 FORCE_SCRAPE_DATES = [
-    date(2026, 9, 23),
+#    date(2026, 9, 23),
 ]
 
 # --- Custom movies with extra language options ---

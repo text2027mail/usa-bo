@@ -23,7 +23,10 @@ FETCH_TOMORROW = True
 # --- Dates for which we want ALL movies (target languages) ---
 SCRAPE_DATES = [
      date(2026, 10, 14),
-     date(2026, 10, 15),    
+     date(2026, 10, 15),
+     date(2026, 11, 4),
+     date(2026, 11, 5),
+     
 ]
 
 # --- Force-run dates ---

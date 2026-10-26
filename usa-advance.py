@@ -734,6 +734,11 @@ def build_date_filter_map():
         master_id = get_master_id(movie_id)
         # All aliases under this master
         aliases = [aid for aid, m in MOVIE_TITLE_MASTER_MAP.items() if m == master_id]
+         
+        # Include standalone movie IDs that are not in MERGE_MOVIE_IDS
+        if movie_id not in aliases: aliases.append(movie_id)
+        if master_id not in aliases: aliases.append(master_id)
+     
 
         if custom.get("extra_langs_for_all_dates", False):
             dates_to_apply = all_dates

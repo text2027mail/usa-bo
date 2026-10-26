@@ -37,7 +37,7 @@ FORCE_SCRAPE_DATES = [
 # --- Custom movies with extra language options ---
 CUSTOM_MOVIES = [
 #   {"movie_id": 244612, "date": date(2026, 8, 25)},
-    {"movie_id": 245446, "date": date(2026, 11, 4), "add_extra_langs_shows": "english"},
+    {"movie_id": 245446, "date": date(2026, 11, 4), "add_extra_langs_shows": "all"},
 ]
 
 # --- File containing US zip codes (one per line) ---

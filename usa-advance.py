@@ -34,7 +34,8 @@ FORCE_SCRAPE_DATES = [
 
 # --- Custom movies with extra language options ---
 CUSTOM_MOVIES = [
-#   {"movie_id": 244612, "date": date(2026, 8, 25)},
+#   {"movie_id": 244612, "date": date(2026, 8, 25)},    
+    {"movie_id": 248014, "date": date(2026, 11, 4), "add_extra_langs_shows": "all"},
     {"movie_id": 245446, "date": date(2026, 11, 4), "add_extra_langs_shows": "all"},
     {"movie_id": 248284, "date": date(2026, 11, 4), "add_extra_langs_shows": "all"},
 ]

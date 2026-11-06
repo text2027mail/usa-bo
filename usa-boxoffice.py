@@ -76,6 +76,10 @@ MERGE_MOVIE_IDS = {
         "ids": [244612, 246785],
         "title": "Toxic (2026)"   # <-- Custom title
     },
+    245446: {
+        "ids": [245446, 248284, 248014],
+        "title": "Ramayana (2026)"   # <-- Custom title
+    },
     # 250001: [250001, 250002, 250003],   # old format still works
 }
 

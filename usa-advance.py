@@ -22,10 +22,8 @@ FETCH_TOMORROW = True
 
 # --- Dates for which we want ALL movies (target languages) ---
 SCRAPE_DATES = [
-     date(2026, 11, 4),
-     date(2026, 11, 5),
-     date(2026, 11, 6),
-     date(2026, 11, 7),
+#     date(2026, 11, 4),
+#     date(2026, 11, 7),
 ]
 
 # --- Force-run dates ---
@@ -38,6 +36,7 @@ FORCE_SCRAPE_DATES = [
 CUSTOM_MOVIES = [
 #   {"movie_id": 244612, "date": date(2026, 8, 25)},
     {"movie_id": 245446, "date": date(2026, 11, 4), "add_extra_langs_shows": "all"},
+    {"movie_id": 248284, "date": date(2026, 11, 4), "add_extra_langs_shows": "all"},
 ]
 
 # --- File containing US zip codes (one per line) ---
@@ -90,6 +89,10 @@ MERGE_MOVIE_IDS = {
     244612: {
         "ids": [244612, 246785],
         "title": "Toxic (2026)"   # <-- Custom title
+    },
+    245446: {
+        "ids": [245446, 248284, 248014],
+        "title": "Ramayana (2026)"   # <-- Custom title
     },
     # 250001: [250001, 250002, 250003],   # old format still works
 }

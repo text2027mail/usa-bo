@@ -25,9 +25,12 @@ CONCURRENCY = 45
 #   date (optional) – if omitted, applies to today.
 #   add_extra_langs_shows: "all" | "english" | "unknown" (optional)
 #   extra_langs_for_all_dates: bool (not used in box-office, but kept for consistency)
+
 CUSTOM_MOVIES = [
-#    {"movie_id": 244612, "add_extra_langs_shows": "all", "extra_langs_for_all_dates": True},
-#    {"movie_id": 244613, "add_extra_langs_shows": "english", "extra_langs_for_all_dates": False, "date": date(2026, 8, 25)},
+#   {"movie_id": 244612, "date": date(2026, 8, 25)},
+    {"movie_id": 248014, "date": date(2026, 11, 4), "add_extra_langs_shows": "all"},
+    {"movie_id": 245446, "date": date(2026, 11, 4), "add_extra_langs_shows": "all"},
+    {"movie_id": 248284, "date": date(2026, 11, 4), "add_extra_langs_shows": "all"},
 ]
 
 # Read seatmap URL from environment variable (must be set)
